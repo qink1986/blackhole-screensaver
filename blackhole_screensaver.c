@@ -47,6 +47,8 @@ static int   g_exitMouse = 0;
 static POINT g_mousePrev;
 static int   g_mouseMoved = 0;
 static int   g_fullscreen = 0;
+static int   g_cursorHideCount = 0;
+static HCURSOR g_savedCursor;
 
 // ============================================================ config ==
 // Config stored in registry under HKCU\Software\BlackHoleScreensaver
@@ -77,9 +79,12 @@ static const char* shaderSource =
 "const float DISK_WIND     = 7.0000;\n"
 "const float DISK_CONTRAST = 1.6000;\n"
 "const float EXPOSURE      = 1.4000;\n"
-"const float DRIFT_SPEED   = 1.0000;\n"
+"const float DRIFT_SPEED   = 0.5000;\n"
+"const float MOVE_SPEED    = 0.2500;\n"
+"const float SCENE_SPEED   = 0.5000;\n"
 "const float WORK_AREA     = 0.0;\n"
 "const float DILATION_MIN  = 0.2000;\n"
+"const float DISK_LOD_CRITICAL_GAIN = 150.0000;\n"
 "#define N_STEPS 48\n"
 "#define B_CRIT 2.5980762\n"
 "\n"
@@ -110,7 +115,7 @@ static const char* shaderSource =
 "\n"
 "// random preset + random size per beat, seamless loop\n"
 "DiskLook demoLook() {\n"
-"  float t=mod(iTime,DEMO_SEC);\n"
+"  float t=mod(iTime*SCENE_SPEED,DEMO_SEC);\n"
 "  // 10 beats, durations normalized to DEMO_SEC\n"
 "  const float rawDur[10]=float[10](7.0,5.5,8.0,6.5,5.8,7.5,6.0,5.2,7.8,6.7);\n"
 "  float total=0.0;\n"
@@ -118,7 +123,7 @@ static const char* shaderSource =
 "  float acc=0.0;int beat=0;float bDur=0.0;\n"
 "  for(int i=0;i<10;i++){\n"
 "    float d=rawDur[i]/total*DEMO_SEC;\n"
-"    if(t>=acc)beat=i;bDur=d;acc+=d;\n"
+"    if(t>=acc){beat=i;bDur=d;}acc+=d;\n"
 "  }\n"
 "  // beat boundaries for crossfade\n"
 "  float bStart=0.0;\n"
@@ -126,7 +131,7 @@ static const char* shaderSource =
 "  for(int i=0;i<beat;i++){acc+=rawDur[i]/total*DEMO_SEC;}bStart=acc;\n"
 "  // cur = preset for this beat, nxt = preset for next beat (same seed!)\n"
 "  int cur=int(hash21(vec2(float(beat),7.0))*7.999);\n"
-"  int nxt=int(hash21(vec2(float(beat)+1.0,7.0))*7.999);\n"
+"  int nxt=int(hash21(vec2(float((beat+1)%10),7.0))*7.999);\n"
 "  // crossfade: slow blend near beat boundary\n"
 "  float xf=min(4.5,bDur*0.35);\n"
 "  float f=smoothstep(bStart+bDur-xf,bStart+bDur,t);\n"
@@ -135,7 +140,7 @@ static const char* shaderSource =
 "\n"
 "// smooth size: overlapping sine waves, always visible\n"
 "float demoSize() {\n"
-"  float t=mod(iTime,DEMO_SEC);\n"
+"  float t=mod(iTime*SCENE_SPEED,DEMO_SEC);\n"
 "  float frac=t/DEMO_SEC;\n"
 "  // slow rise and fall\n"
 "  float base=smoothstep(0.0,0.22,frac)*(1.0-smoothstep(0.75,1.0,frac));\n"
@@ -154,6 +159,20 @@ static const char* shaderSource =
 "  float y0=mod(i.y,perY),y1=mod(i.y+1.0,perY);\n"
 "  return mix(mix(hash21(vec2(i.x,y0)),hash21(vec2(i.x+1.0,y0)),f.x),\n"
 "             mix(hash21(vec2(i.x,y1)),hash21(vec2(i.x+1.0,y1)),f.x),f.y);\n"
+"}\n"
+"// Derivative-free noise LOD is safe inside the fragment-varying disk-hit path.\n"
+"float filteredVnoiseWrapY(vec2 p,float perY,float footprint){\n"
+"  float detail=1.0-smoothstep(0.20,0.60,footprint);\n"
+"  return mix(0.5,vnoiseWrapY(p,perY),detail);\n"
+"}\n"
+"float diskNoiseFootprint(float radialScale,float angularPeriod,float swirlScale,float rc,float dSwirl,float b,float W){\n"
+"  float pixelB=W/max(iResolution.y,1.0);\n"
+"  float critical=pixelB/max(abs(b-B_CRIT),pixelB);\n"
+"  float rayFootprint=pixelB*(1.0+DISK_LOD_CRITICAL_GAIN*critical);\n"
+"  float radialFootprint=radialScale*rayFootprint;\n"
+"  float angularFootprint=angularPeriod*rayFootprint/(6.2831853*max(rc,1.0));\n"
+"  float swirlFootprint=swirlScale*abs(dSwirl)*rayFootprint;\n"
+"  return max(radialFootprint,length(vec2(angularFootprint,swirlFootprint)));\n"
 "}\n"
 "vec2 mirrorUV(vec2 u){return 1.0-abs(1.0-mod(u,2.0));}\n"
 "vec2 rot(vec2 v,float a){float c=cos(a),s=sin(a);return vec2(c*v.x-s*v.y,s*v.x+c*v.y);}\n"
@@ -183,8 +202,10 @@ static const char* shaderSource =
 "}\n"
 "\n"
 "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n"
-"  vec2 res=iResolution.xy;vec2 uv=fragCoord/res;float aspect=res.x/res.y;\n"
-"  float yUp=1.0-uv.y;float t=iTime*DRIFT_SPEED;\n"
+"  vec2 res=iResolution.xy;\n"
+"  // Ghostty supplies top-down fragment coordinates; OpenGL gl_FragCoord is bottom-up.\n"
+"  vec2 uv=vec2(fragCoord.x,res.y-fragCoord.y)/res;float aspect=res.x/res.y;\n"
+"  float yUp=1.0-uv.y;float rotationPhase=iTime*DRIFT_SPEED*DISK_SPEED;float moveTime=iTime*MOVE_SPEED;\n"
 "  DiskLook L=demoLook();\n"
 "  float rin=max(L.inner,1.6),rout=max(L.outer,rin+0.5);\n"
 "  float g=demoSize(),I=mix(0.10,1.0,g);\n"
@@ -199,10 +220,10 @@ static const char* shaderSource =
 "  vec2 roamLo=vec2(xP,marg+0.05);\n"
 "  vec2 roamHi=vec2(1.0-xP,0.95-marg);\n"
 "  // two Lissajous with different frequencies for x and y\n"
-"  float wx=0.13+0.07*sin(t*0.017);\n"
-"  float wy=0.11+0.05*cos(t*0.023);\n"
-"  vec2 lc=vec2(0.5+0.42*sin(t*wx)+0.12*sin(t*wx*2.7+1.3),\n"
-"               0.5+0.38*cos(t*wy)+0.10*cos(t*wy*3.1+0.7));\n"
+"  float wx=0.13+0.07*sin(moveTime*0.017);\n"
+"  float wy=0.11+0.05*cos(moveTime*0.023);\n"
+"  vec2 lc=vec2(0.5+0.42*sin(moveTime*wx)+0.12*sin(moveTime*wx*2.7+1.3),\n"
+"               0.5+0.38*cos(moveTime*wy)+0.10*cos(moveTime*wy*3.1+0.7));\n"
 "  // scale to roam area\n"
 "  vec2 center=mix(roamLo,roamHi,lc);\n"
 "  float rh=HOLE_RADIUS*sz;\n"
@@ -224,13 +245,19 @@ static const char* shaderSource =
 "  }\n"
 "  vec3 x=vec3(pr,Z0),v=vec3(0.0,0.0,-1.0);float h2=dot(pr,pr);\n"
 "  float ci=cos(L.incl),si=sin(L.incl);vec3 n=vec3(0.0,si,ci),e2=vec3(0.0,ci,-si);\n"
-"  float sdir=L.speed<0.0?-1.0:1.0,spd=abs(L.speed);\n"
+"  float sdir=DISK_SPEED<0.0?-1.0:1.0;\n"
 "  vec3 emitc=vec3(0.0);float trans=1.0;bool captured=false;\n"
 "  float sPrev=dot(x,n);vec3 xPrev=x;\n"
 "  for(int i=0;i<N_STEPS;i++){\n"
 "    float r2=dot(x,x);if(r2<1.0){captured=true;break;}\n"
 "    if(x.z<-Z0&&v.z<0.0)break;if(r2>4.0*Z0*Z0)break;\n"
 "    float r=sqrt(r2);float dt=clamp(0.16*r,0.03,1.5);\n"
+"    // Resolve grazing intersections with the infinitesimally thin disk plane.\n"
+"    float planeRate=dot(v,n);\n"
+"    if(sPrev*planeRate<0.0&&abs(planeRate)>1e-3){\n"
+"      float tPlane=abs(sPrev)/abs(planeRate);\n"
+"      dt=min(dt,1.10*tPlane);\n"
+"    }\n"
 "    vec3 a=-1.5*h2*x/(r2*r2*r);v+=a*(0.5*dt);x+=v*dt;\n"
 "    r2=dot(x,x);r=sqrt(r2);a=-1.5*h2*x/(r2*r2*r);v+=a*(0.5*dt);\n"
 "    float s=dot(x,n);\n"
@@ -239,9 +266,16 @@ static const char* shaderSource =
 "        float band=smoothstep(rin,rin*1.25,rc)*(1.0-smoothstep(rout*0.70,rout,rc));\n"
 "        float phi=atan(dot(xc,e2),xc.x),turns=phi/6.2831853,kep=pow(rin/rc,1.5);\n"
 "        float gloc=sqrt(max(1.0-1.5/rc,0.02));\n"
-"        float swirl=rc*L.wind*0.12-t*kep*spd*gloc*dil*sdir;\n"
-"        float streaks=vnoiseWrapY(vec2(rc*2.8,turns*19.0+swirl*3.0),19.0)*0.65\n"
-"                     +vnoiseWrapY(vec2(rc*1.0,turns*9.0+swirl*1.5+7.0),9.0)*0.35;\n"
+"        float swirl=rc*L.wind*0.12-rotationPhase*kep*gloc*dil;\n"
+"        vec2 streakA=vec2(rc*2.8,turns*19.0+swirl*3.0);\n"
+"        vec2 streakB=vec2(rc*1.0,turns*9.0+swirl*1.5+7.0);\n"
+"        float dKep=-1.5*kep/rc;\n"
+"        float dGloc=0.75/(rc*rc*max(gloc,1e-3));\n"
+"        float dSwirl=0.12*L.wind-rotationPhase*dil*(dKep*gloc+kep*dGloc);\n"
+"        float footprintA=diskNoiseFootprint(2.8,19.0,3.0,rc,dSwirl,b,W);\n"
+"        float footprintB=diskNoiseFootprint(1.0,9.0,1.5,rc,dSwirl,b,W);\n"
+"        float streaks=filteredVnoiseWrapY(streakA,19.0,footprintA)*0.65\n"
+"                     +filteredVnoiseWrapY(streakB,9.0,footprintB)*0.35;\n"
 "        streaks=0.35+L.contr*streaks*streaks;\n"
 "        vec3 gasdir=normalize(cross(n,xc))*sdir;\n"
 "        float beta=clamp(inversesqrt(max(2.0*(rc-1.0),0.2)),0.0,0.99);\n"
@@ -320,7 +354,6 @@ typedef void (APIENTRY *PFNGLBINDBUFFERPROC)(GLenum, GLuint);
 typedef void (APIENTRY *PFNGLBUFFERDATAPROC)(GLenum, GLsizei, const void*, GLenum);
 typedef void (APIENTRY *PFNGLENABLEVERTEXATTRIBARRAYPROC)(GLuint);
 typedef void (APIENTRY *PFNGLVERTEXATTRIBPOINTERPROC)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*);
-typedef void (APIENTRY *PFNGLDRAWARRAYSPROC)(GLenum, GLint, GLsizei);
 typedef GLint (APIENTRY *PFNGLGETATTRIBLOCATIONPROC)(GLuint, const GLchar*);
 
 static PFNGLGENVERTEXARRAYSPROC       p_glGenVertexArrays;
@@ -330,7 +363,6 @@ static PFNGLBINDBUFFERPROC            p_glBindBuffer;
 static PFNGLBUFFERDATAPROC            p_glBufferData;
 static PFNGLENABLEVERTEXATTRIBARRAYPROC p_glEnableVertexAttribArray;
 static PFNGLVERTEXATTRIBPOINTERPROC   p_glVertexAttribPointer;
-static PFNGLDRAWARRAYSPROC            p_glDrawArrays;
 static PFNGLGETATTRIBLOCATIONPROC     p_glGetAttribLocation;
 typedef void (APIENTRY *PFNGLGETPROGRAMINFOLOGPROC)(GLuint, GLsizei, GLsizei*, GLchar*);
 static PFNGLGETPROGRAMINFOLOGPROC   p_glGetProgramInfoLog;
@@ -376,7 +408,6 @@ static int loadGLFunctions(void) {
     p_glBufferData         = (void*)wglGetProcAddress("glBufferData");
     p_glEnableVertexAttribArray = (void*)wglGetProcAddress("glEnableVertexAttribArray");
     p_glVertexAttribPointer    = (void*)wglGetProcAddress("glVertexAttribPointer");
-    p_glDrawArrays         = (void*)wglGetProcAddress("glDrawArrays");
     p_glGetAttribLocation  = (void*)wglGetProcAddress("glGetAttribLocation");
     p_glGetProgramInfoLog  = (void*)wglGetProcAddress("glGetProgramInfoLog");
     return glCreateShader && glCreateProgram && glUseProgram && p_glGenVertexArrays;
@@ -666,10 +697,30 @@ static void renderFrame(void) {
 
     // fullscreen quad
     p_glBindVertexArray(vao);
-    p_glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    // glDrawArrays is part of OpenGL 1.1 and is exported by opengl32.dll.
+    // Resolving it through wglGetProcAddress hangs on some Intel drivers.
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     p_glBindVertexArray(0);
 
     SwapBuffers(hDC);
+}
+
+static void hideCursor(void) {
+    if (g_cursorHideCount) return;
+    do {
+        ++g_cursorHideCount;
+    } while (ShowCursor(FALSE) >= 0);
+    g_savedCursor = SetCursor(NULL);
+}
+
+static void restoreCursor(void) {
+    if (!g_cursorHideCount) return;
+    while (g_cursorHideCount > 0) {
+        ShowCursor(TRUE);
+        --g_cursorHideCount;
+    }
+    SetCursor(g_savedCursor);
+    g_savedCursor = NULL;
 }
 
 static int shouldExit(void) {
@@ -690,6 +741,12 @@ static int shouldExit(void) {
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+    case WM_SETCURSOR:
+        if (g_fullscreen && g_cursorHideCount) {
+            SetCursor(NULL);
+            return TRUE;
+        }
+        break;
     case WM_CREATE:
         SetTimer(hwnd, 1, 16, NULL);  // ~60fps
         g_tick0 = GetTickCount();
@@ -805,8 +862,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmdLine, int show
         g_H = GetSystemMetrics(SM_CYSCREEN);
         hwnd = CreateWindowExA(0, "BlackHoleSCR", "", style,
             0, 0, g_W, g_H, NULL, NULL, hInstance, NULL);
-        // hide cursor
-        SetCursor(NULL);
         g_fullscreen = 1;
     }
 
@@ -820,6 +875,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmdLine, int show
 
     if (!initShader()) return 1;
 
+    if (g_fullscreen) hideCursor();
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
 
@@ -829,6 +885,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmdLine, int show
         DispatchMessage(&msg);
     }
 
+    restoreCursor();
     wglMakeCurrent(NULL, NULL);
     if (hRC) wglDeleteContext(hRC);
     if (hDC) ReleaseDC(hwnd, hDC);
