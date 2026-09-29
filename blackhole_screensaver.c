@@ -19,6 +19,9 @@ typedef unsigned int GLenum;
 typedef unsigned int GLuint;
 typedef int GLint;
 typedef int GLsizei;
+typedef unsigned int GLbitfield;
+typedef unsigned long long GLuint64;
+typedef struct __GLsync* GLsync;
 #define GL_VERTEX_SHADER_ARB          0x8B31
 #define GL_FRAGMENT_SHADER_ARB        0x8B30
 #define GL_COMPILE_STATUS              0x8B81
@@ -29,6 +32,11 @@ typedef int GLsizei;
 #define GL_TRIANGLE_STRIP             0x0005
 #define GL_TRUE                       1
 #define GL_FALSE                      0
+#define GL_SYNC_GPU_COMMANDS_COMPLETE 0x9117
+#define GL_ALREADY_SIGNALED           0x911A
+#define GL_TIMEOUT_EXPIRED            0x911B
+#define GL_CONDITION_SATISFIED        0x911C
+#define GL_WAIT_FAILED                0x911D
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -41,7 +49,7 @@ static HINSTANCE hInst;
 static int   g_W, g_H;
 static int   g_preview = 0;   // running in preview mode
 static int   g_configured = 0;
-static DWORD g_tick0;
+static ULONGLONG g_tick0;
 static int   g_exitKey = 0;
 static int   g_exitMouse = 0;
 static POINT g_mousePrev;
@@ -49,6 +57,20 @@ static int   g_mouseMoved = 0;
 static int   g_fullscreen = 0;
 static int   g_cursorHideCount = 0;
 static HCURSOR g_savedCursor;
+
+// Permit presentation attempts up to 100 fps. The one-pass 48-step ray marcher
+// still stays bounded by the one-frame fence and adaptive post-frame cooldown.
+#define FRAME_INTERVAL_MS 10
+// Slow frames get an additional bounded rest after their fence retires. The
+// elapsed time is host submit-to-observation time, not a hardware GPU query.
+#define FRAME_COOLDOWN_TRIGGER_MS (2ULL * FRAME_INTERVAL_MS)
+#define FRAME_COOLDOWN_MAX_MS 3000ULL
+
+static GLsync g_frameFence;
+static ULONGLONG g_frameSubmitTick;
+static ULONGLONG g_nextFrameEligibleTick;
+static int g_frameSyncReady;
+static GLfloat g_sceneSeed;
 
 // ============================================================ config ==
 // Config stored in registry under HKCU\Software\BlackHoleScreensaver
@@ -75,83 +97,68 @@ static const char* shaderSource =
 "const float DISK_GAIN     = 2.2000;\n"
 "const float DISK_TEMP     = 5500.0000;\n"
 "const float DISK_BEAM     = 2.5000;\n"
-"const float DISK_SPEED    = 5.0000;\n"
 "const float DISK_WIND     = 7.0000;\n"
 "const float DISK_CONTRAST = 1.6000;\n"
 "const float EXPOSURE      = 1.4000;\n"
-"const float DRIFT_SPEED   = 0.5000;\n"
-"const float MOVE_SPEED    = 0.2500;\n"
-"const float SCENE_SPEED   = 0.5000;\n"
+"const float DRIFT_SPEED   = 0.2500;\n"
 "const float WORK_AREA     = 0.0;\n"
-"const float DILATION_MIN  = 0.2000;\n"
 "const float DISK_LOD_CRITICAL_GAIN = 150.0000;\n"
 "#define N_STEPS 48\n"
 "#define B_CRIT 2.5980762\n"
 "\n"
-"const float DEMO_SEC      = 60.0;\n"
-"const float DEMO_XFADE    = 0.18;\n"
+"const float MACRO_CYCLE_SEC      = 36.0000;\n"
+"const float MACRO_FADE_SEC       = 3.0000;\n"
+"\n"
+"const float DEMO_SEC       = 96.0000;\n"
+"const float DEMO_HOLD_SEC  = 18.0000;\n"
+"const float DEMO_FADE_SEC  = 6.0000;\n"
+"const float DEMO_SIZE_SEC  = 128.0000;\n"
+"\n"
+"// Hash shared by the launch-seeded scene deck and procedural background.\n"
+"float hash21(vec2 p){p=fract(p*vec2(234.34,435.345));p+=dot(p,p+34.23);return fract(p.x*p.y);}\n"
 "\n"
 "struct DiskLook { float temp,incl,roll,inner,outer,opac,dopp,beam,gain,contr,wind,speed,expo,star; };\n"
-"#define DEMO_N 8\n"
+"#define DEMO_N 4\n"
+"// Four legacy looks, now driven by a bounded continuous drift rather than fixed framing.\n"
 "const DiskLook DEMO_TOUR[DEMO_N] = DiskLook[DEMO_N](\n"
 "  DiskLook(5500.,1.50,0.35,1.8,8.0,0.90,0.60,2.5,2.2,1.6,7.0,5.0,1.40,0.3),\n"
 "  DiskLook(4500.,1.52,0.10,2.2,7.0,0.85,0.35,2.0,1.4,0.5,7.0,5.0,1.20,0.3),\n"
 "  DiskLook(3800.,0.55,-0.30,2.2,6.0,0.45,0.90,3.5,1.6,0.4,3.0,2.5,1.10,0.3),\n"
-"  DiskLook(6500.,0.30,0.00,3.0,10.0,0.50,0.80,2.5,1.0,1.1,7.0,5.0,1.00,0.3),\n"
-"  DiskLook(15000.,1.30,0.35,3.0,14.0,0.35,1.00,4.0,1.2,1.3,8.0,5.0,0.80,0.3),\n"
-"  DiskLook(18000.,1.05,0.55,3.0,16.0,0.30,1.00,5.0,1.0,1.5,9.0,6.0,0.75,0.3),\n"
-"  DiskLook(5500.,1.50,0.35,1.8,8.0,0.00,1.00,2.5,0.0,1.6,7.0,5.0,1.00,0.6),\n"
-"  DiskLook(5500.,1.50,0.35,1.8,8.0,0.90,0.60,2.5,2.2,1.6,7.0,5.0,1.40,0.3));\n"
+"  DiskLook(6500.,0.30,0.00,3.0,10.0,0.50,0.80,2.5,1.0,1.1,7.0,5.0,1.00,0.3));\n"
 "\n"
-"DiskLook mixLook(DiskLook a, DiskLook b, float f) {\n"
+"DiskLook mixLook(DiskLook a,DiskLook b,float f){\n"
 "  return DiskLook(mix(a.temp,b.temp,f),mix(a.incl,b.incl,f),mix(a.roll,b.roll,f),\n"
 "    mix(a.inner,b.inner,f),mix(a.outer,b.outer,f),mix(a.opac,b.opac,f),\n"
 "    mix(a.dopp,b.dopp,f),mix(a.beam,b.beam,f),mix(a.gain,b.gain,f),\n"
 "    mix(a.contr,b.contr,f),mix(a.wind,b.wind,f),mix(a.speed,b.speed,f),\n"
 "    mix(a.expo,b.expo,f),mix(a.star,b.star,f));\n"
 "}\n"
-"// hash for pseudo-random but deterministic randomness\n"
-"float hash21(vec2 p){p=fract(p*vec2(234.34,435.345));p+=dot(p,p+34.23);return fract(p.x*p.y);}\n"
-"\n"
-"// random preset + random size per beat, seamless loop\n"
-"DiskLook demoLook() {\n"
-"  float t=mod(iTime*SCENE_SPEED,DEMO_SEC);\n"
-"  // 10 beats, durations normalized to DEMO_SEC\n"
-"  const float rawDur[10]=float[10](7.0,5.5,8.0,6.5,5.8,7.5,6.0,5.2,7.8,6.7);\n"
-"  float total=0.0;\n"
-"  for(int i=0;i<10;i++)total+=rawDur[i];\n"
-"  float acc=0.0;int beat=0;float bDur=0.0;\n"
-"  for(int i=0;i<10;i++){\n"
-"    float d=rawDur[i]/total*DEMO_SEC;\n"
-"    if(t>=acc){beat=i;bDur=d;}acc+=d;\n"
-"  }\n"
-"  // beat boundaries for crossfade\n"
-"  float bStart=0.0;\n"
-"  acc=0.0;\n"
-"  for(int i=0;i<beat;i++){acc+=rawDur[i]/total*DEMO_SEC;}bStart=acc;\n"
-"  // cur = preset for this beat, nxt = preset for next beat (same seed!)\n"
-"  int cur=int(hash21(vec2(float(beat),7.0))*7.999);\n"
-"  int nxt=int(hash21(vec2(float((beat+1)%10),7.0))*7.999);\n"
-"  // crossfade: slow blend near beat boundary\n"
-"  float xf=min(4.5,bDur*0.35);\n"
-"  float f=smoothstep(bStart+bDur-xf,bStart+bDur,t);\n"
-"  return mixLook(DEMO_TOUR[cur],DEMO_TOUR[nxt],f);\n"
+"// Each 96-second block visits all four looks once. The seeded anchor advances\n"
+"// between blocks, so the boundary cannot repeat; the other order choices vary.\n"
+"int sceneAt(int segmentIndex){\n"
+"  int block=segmentIndex/DEMO_N,slot=segmentIndex-block*DEMO_N;\n"
+"  int anchor=(int(floor(uSceneSeed*float(DEMO_N)))+block)%DEMO_N;\n"
+"  int nextAnchor=(anchor+1)%DEMO_N;\n"
+"  bool chooseEndA=hash21(vec2(float(block)+uSceneSeed*17.0,19.0))<0.5;\n"
+"  int endA=(anchor+2)%DEMO_N,endB=(anchor+3)%DEMO_N;\n"
+"  int end=chooseEndA?endA:endB,other=chooseEndA?endB:endA;\n"
+"  bool nextAnchorFirst=hash21(vec2(float(block)+uSceneSeed*31.0,53.0))<0.5;\n"
+"  if(slot==0)return anchor;\n"
+"  if(slot==1)return nextAnchorFirst?nextAnchor:other;\n"
+"  if(slot==2)return nextAnchorFirst?other:nextAnchor;\n"
+"  return end;\n"
 "}\n"
-"\n"
-"// smooth size: overlapping sine waves, always visible\n"
-"float demoSize() {\n"
-"  float t=mod(iTime*SCENE_SPEED,DEMO_SEC);\n"
-"  float frac=t/DEMO_SEC;\n"
-"  // slow rise and fall\n"
-"  float base=smoothstep(0.0,0.22,frac)*(1.0-smoothstep(0.75,1.0,frac));\n"
-"  // smooth perturbation via overlapping sines (no hash discontinuity)\n"
-"  float wave=0.0;\n"
-"  wave+=0.30*sin(frac*6.2832*1.0+1.7);\n"
-"  wave+=0.18*sin(frac*6.2832*2.3+4.1);\n"
-"  wave+=0.10*sin(frac*6.2832*3.7+0.3);\n"
-"  wave+=0.06*sin(frac*6.2832*5.1+2.9);\n"
-"  // base ensures 0 at loop ends, wave adds organic modulation\n"
-"  return clamp(base*(0.65+wave),0.0,1.0);\n"
+"DiskLook demoLook(){\n"
+"  float segment=DEMO_HOLD_SEC+DEMO_FADE_SEC;\n"
+"  int segmentIndex=int(floor(iTime/segment));\n"
+"  float local=fract(iTime/segment),fade=smoothstep(DEMO_HOLD_SEC/segment,1.0,local);\n"
+"  return mixLook(DEMO_TOUR[sceneAt(segmentIndex)],DEMO_TOUR[sceneAt(segmentIndex+1)],fade);\n"
+"}\n"
+"float demoSize(){\n"
+"  float phase=mod(iTime,DEMO_SIZE_SEC)/DEMO_SIZE_SEC;\n"
+"  float swell=0.5-0.5*cos(6.2831853*phase);\n"
+"  float ripple=0.08*swell*(1.0-swell)*sin(12.5663706*phase-0.6);\n"
+"  return swell+ripple;\n"
 "}\n"
 "\n"
 "float vnoiseWrapY(vec2 p,float perY){\n"
@@ -174,6 +181,27 @@ static const char* shaderSource =
 "  float swirlFootprint=swirlScale*abs(dSwirl)*rayFootprint;\n"
 "  return max(radialFootprint,length(vec2(angularFootprint,swirlFootprint)));\n"
 "}\n"
+"float diskBlob(float radial,float phase,float radialCenter,float radialWidth,float phaseCenter,float phaseWidth){\n"
+"  float radialWeight=1.0-smoothstep(radialWidth,radialWidth*1.35,abs(radial-radialCenter));\n"
+"  float angular=cos(6.2831853*(phase-phaseCenter));\n"
+"  float angularEdge=cos(6.2831853*phaseWidth);\n"
+"  return radialWeight*smoothstep(angularEdge,1.0,angular);\n"
+"}\n"
+"// Broad, disk-space features make matter visible without screen-locked noise.\n"
+"float diskMacroDensity(float rc,float turns,float macroSwirl,float rin,float rout,float cycleSeed,float detail){\n"
+"  float radial=clamp((rc-rin)/max(rout-rin,0.5),0.0,1.0);\n"
+"  float phase=turns+macroSwirl*0.12;\n"
+"  float p0=fract(0.08+cycleSeed*0.37),p1=fract(0.43+cycleSeed*0.61);\n"
+"  float p2=fract(0.71+cycleSeed*0.83),p3=fract(0.86+cycleSeed*0.29);\n"
+"  float density=1.0;\n"
+"  density+=0.38*diskBlob(radial,phase,0.20,0.13,p0,0.10);\n"
+"  density+=0.31*diskBlob(radial,phase,0.48,0.17,p1,0.13);\n"
+"  density+=0.27*diskBlob(radial,phase,0.76,0.12,p2,0.09);\n"
+"  density+=0.18*diskBlob(radial,phase,0.35,0.10,p3,0.07);\n"
+"  density-=0.25*diskBlob(radial,phase,0.62,0.20,fract(p0+0.12),0.12);\n"
+"  density-=0.18*diskBlob(radial,phase,0.27,0.12,fract(p1+0.20),0.10);\n"
+"  return mix(1.0,clamp(density,0.48,1.72),detail);\n"
+"}\n"
 "vec2 mirrorUV(vec2 u){return 1.0-abs(1.0-mod(u,2.0));}\n"
 "vec2 rot(vec2 v,float a){float c=cos(a),s=sin(a);return vec2(c*v.x-s*v.y,s*v.x+c*v.y);}\n"
 "vec2 lissa(float t){return vec2(0.75*sin(t*0.37)+0.25*sin(t*0.83+1.0),0.70*sin(t*0.54+2.1)+0.30*sin(t*1.07));}\n"
@@ -184,51 +212,75 @@ static const char* shaderSource =
 "  float b=t>=66.0?1.0:(t<=19.0?0.0:clamp(0.5432068*log(t-10.0)-1.1962540,0.0,1.0));\n"
 "  return vec3(r,g,b);\n"
 "}\n"
+"// Six isolated sources plus two three-star clusters. A single immutable\n"
+"// launch rotation makes their sky positions random without a tiled star grid.\n"
+"const vec3 STAR_CATALOG[12]=vec3[12](\n"
+"  vec3(0.309985,0.879956,-0.359982),vec3(-0.720829,0.130150,-0.680783),\n"
+"  vec3(0.808909,-0.209717,-0.549259),vec3(-0.160064,-0.940376,0.300120),\n"
+"  vec3(0.129831,0.439429,0.888845),vec3(-0.930140,-0.320048,-0.180027),\n"
+"  vec3(0.420182,-0.300130,-0.856370),vec3(0.397884,-0.285917,-0.871745),\n"
+"  vec3(0.441715,-0.321792,-0.837459),vec3(-0.640040,0.560035,0.526033),\n"
+"  vec3(-0.617022,0.578021,0.534019),vec3(-0.661013,0.540010,0.521010));\n"
+"vec3 rotateSky(vec3 v,vec3 axis,float c,float s){\n"
+"  return v*c+cross(axis,v)*s+axis*dot(axis,v)*(1.0-c);\n"
+"}\n"
 "vec3 stars(vec3 d){\n"
-"  vec2 sph=vec2(atan(d.x,-d.z),asin(clamp(d.y,-1.0,1.0)));\n"
-"  vec2 g=sph*40.0;vec2 id=floor(g);float h=hash21(id);\n"
-"  if(h<0.92)return vec3(0.0);\n"
-"  vec2 f=fract(g)-0.5;vec2 off=(vec2(hash21(id+17.3),hash21(id+31.7))-0.5)*0.7;\n"
-"  float spark=smoothstep(0.10,0.0,length(f-off));\n"
-"  float tw=0.7+0.3*sin(iTime*(0.5+2.0*hash21(id+5.1))+40.0*h);\n"
-"  vec3 tint=mix(vec3(1.0,0.82,0.60),vec3(0.75,0.85,1.0),hash21(id+2.9));\n"
-"  return tint*spark*tw*((h-0.92)/0.08);\n"
+"  float azimuth=6.2831853*hash21(vec2(uSceneSeed*17.0,7.0));\n"
+"  float axisZ=1.0-2.0*hash21(vec2(uSceneSeed*29.0,13.0));\n"
+"  float axisR=sqrt(max(1.0-axisZ*axisZ,0.0));\n"
+"  vec3 axis=vec3(axisR*cos(azimuth),axisZ,axisR*sin(azimuth));\n"
+"  float angle=6.2831853*hash21(vec2(uSceneSeed*43.0,23.0));\n"
+"  float c=cos(angle),s=sin(angle);\n"
+"  float pixelAngle=1.8/max(iResolution.y,1.0);\n"
+"  float core=max(0.0016,pixelAngle),edge=core*2.4;\n"
+"  vec3 field=vec3(0.0);\n"
+"  for(int i=0;i<12;i++){\n"
+"    vec3 source=rotateSky(STAR_CATALOG[i],axis,c,s);\n"
+"    float scale=i<6?1.0:0.62;float radius=core*(i<6?1.0:0.78);\n"
+"    float dist2=dot(d-source,d-source);\n"
+"    float spark=1.0-smoothstep(radius*radius,(radius*2.4)*(radius*2.4),dist2);\n"
+"    float hue=hash21(vec2(float(i)+0.7,uSceneSeed*37.0));\n"
+"    vec3 tint=mix(vec3(1.0,0.76,0.50),vec3(0.66,0.80,1.0),hue);\n"
+"    field+=tint*spark*scale*(0.42+0.58*hash21(vec2(float(i),11.0)));\n"
+"    if(i==6||i==9){\n"
+"      float halo=1.0-smoothstep((core*7.0)*(core*7.0),(core*16.0)*(core*16.0),dist2);\n"
+"      field+=tint*halo*0.045;\n"
+"    }\n"
+"  }\n"
+"  return field;\n"
 "}\n"
 "vec3 spaceBackground(vec2 uv){\n"
-"  float n1=hash21(floor(uv*8.0)),n2=hash21(floor(uv*16.0)),n3=hash21(floor(uv*32.0));\n"
-"  float nebula=n1*0.3+n2*0.15+n3*0.05;\n"
-"  vec3 nebColor=mix(vec3(0.02,0.01,0.04),vec3(0.04,0.02,0.06),sin(n1*6.28+1.0)*0.5+0.5);\n"
-"  return nebColor*(0.5+nebula);\n"
+"  // A nearly black field keeps the disk dominant without a visible nebula.\n"
+"  float gradient=0.85+0.15*uv.y;\n"
+"  return vec3(0.0012,0.0010,0.0020)*gradient;\n"
+"}\n"
+"vec3 plainBackground(vec2 uv,float aspect,float starGain){\n"
+"  vec3 d=normalize(vec3((uv-0.5)*vec2(aspect,1.0),-1.0));\n"
+"  return spaceBackground(uv)+stars(d)*starGain*0.65;\n"
+"}\n"
+"vec3 backgroundSource(vec2 lensedUv){\n"
+"  return spaceBackground(mirrorUV(lensedUv));\n"
 "}\n"
 "\n"
 "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n"
 "  vec2 res=iResolution.xy;\n"
 "  // Ghostty supplies top-down fragment coordinates; OpenGL gl_FragCoord is bottom-up.\n"
 "  vec2 uv=vec2(fragCoord.x,res.y-fragCoord.y)/res;float aspect=res.x/res.y;\n"
-"  float yUp=1.0-uv.y;float rotationPhase=iTime*DRIFT_SPEED*DISK_SPEED;float moveTime=iTime*MOVE_SPEED;\n"
+"  float yUp=1.0-uv.y;float driftTime=iTime*DRIFT_SPEED;\n"
 "  DiskLook L=demoLook();\n"
+"  L.star*=clamp(uStarGain,0.0,1.0)/0.30;\n"
+"  L.opac=clamp(L.opac*clamp(uDiskOpacity,0.0,1.0)/0.90,0.0,1.0);\n"
+"  L.dopp=clamp(L.dopp*clamp(uDoppler,0.0,1.0)/0.60,0.0,1.0);\n"
+"  float rotationPhase=iTime*DRIFT_SPEED*abs(L.speed);\n"
 "  float rin=max(L.inner,1.6),rout=max(L.outer,rin+0.5);\n"
-"  float g=demoSize(),I=mix(0.10,1.0,g);\n"
-"  float vis=smoothstep(0.0,0.10,I);\n"
-"  if(vis<=0.0){fragColor=vec4(spaceBackground(uv),1.0);return;}\n"
-"  float rhMin=sqrt(0.010*aspect/3.1415927),rhMax=sqrt(0.500*aspect/3.1415927);\n"
-"  float rhT=mix(rhMin,rhMax,g)*(HOLE_RADIUS/0.08);\n"
-"  float sz=rhT/max(HOLE_RADIUS,1e-4);\n"
-"  // roam freely across the whole screen (above work area)\n"
-"  float marg=0.08;\n"
-"  float xP=marg/aspect;\n"
-"  vec2 roamLo=vec2(xP,marg+0.05);\n"
-"  vec2 roamHi=vec2(1.0-xP,0.95-marg);\n"
-"  // two Lissajous with different frequencies for x and y\n"
-"  float wx=0.13+0.07*sin(moveTime*0.017);\n"
-"  float wy=0.11+0.05*cos(moveTime*0.023);\n"
-"  vec2 lc=vec2(0.5+0.42*sin(moveTime*wx)+0.12*sin(moveTime*wx*2.7+1.3),\n"
-"               0.5+0.38*cos(moveTime*wy)+0.10*cos(moveTime*wy*3.1+0.7));\n"
-"  // scale to roam area\n"
-"  vec2 center=mix(roamLo,roamHi,lc);\n"
-"  float rh=HOLE_RADIUS*sz;\n"
-"  float dil=mix(1.0,DILATION_MIN,I);\n"
-"  float shield=vis*smoothstep(WORK_AREA,WORK_AREA+0.18,yUp);\n"
+"  float size=demoSize(),rh=mix(0.090,0.145,size);\n"
+"  float margin=clamp(1.45*rh+0.04,0.09,0.30),xMargin=margin/aspect;\n"
+"  vec2 roamLo=vec2(min(xMargin,0.5),margin),roamHi=vec2(max(0.5,1.0-xMargin),1.0-margin);\n"
+"  vec2 center=(roamLo+roamHi)*0.5+lissa(driftTime*0.25)*((roamHi-roamLo)*0.38);\n"
+"  center=clamp(center,roamLo,roamHi);\n"
+"  float sceneVis=1.0;vec3 plainBg=plainBackground(uv,aspect,L.star);\n"
+"  float dil=1.0;\n"
+"  float shield=sceneVis*smoothstep(WORK_AREA,WORK_AREA+0.18,yUp);\n"
 "  vec2 p=(uv-center)*vec2(aspect,1.0);float plen=length(p);\n"
 "  float W=B_CRIT/max(rh,1e-4);vec2 pr=rot(vec2(p.x,-p.y),L.roll)*W;float b=length(pr);\n"
 "  float window=exp(-pow(plen/(7.0*rh),2.0));\n"
@@ -239,13 +291,14 @@ static const char* shaderSource =
 "    vec2 dir=p/max(plen,1e-5);vec3 term;\n"
 "    float ab=0.035*smoothstep(1.0,2.0,b/bmax);\n"
 "    for(int i=0;i<3;i++){float k=1.0+(float(i)-1.0)*ab;vec2 sp=p-dir*defl*k;\n"
-"      vec2 suv=mirrorUV(center+sp/vec2(aspect,1.0));term[i]=spaceBackground(suv)[i];}\n"
+"      vec2 suv=center+sp/vec2(aspect,1.0);term[i]=backgroundSource(suv)[i];}\n"
 "    vec3 d=normalize(vec3(-(pr/b)*(2.0/b),-1.0));\n"
-"    fragColor=vec4(term+stars(d)*L.star*window*shield,1.0);return;\n"
+"    vec3 sceneColor=term+stars(d)*L.star*window*shield;\n"
+"    fragColor=vec4(mix(plainBg,sceneColor,sceneVis),1.0);return;\n"
 "  }\n"
 "  vec3 x=vec3(pr,Z0),v=vec3(0.0,0.0,-1.0);float h2=dot(pr,pr);\n"
 "  float ci=cos(L.incl),si=sin(L.incl);vec3 n=vec3(0.0,si,ci),e2=vec3(0.0,ci,-si);\n"
-"  float sdir=DISK_SPEED<0.0?-1.0:1.0;\n"
+"  float sdir=L.speed<0.0?-1.0:1.0;\n"
 "  vec3 emitc=vec3(0.0);float trans=1.0;bool captured=false;\n"
 "  float sPrev=dot(x,n);vec3 xPrev=x;\n"
 "  for(int i=0;i<N_STEPS;i++){\n"
@@ -266,24 +319,41 @@ static const char* shaderSource =
 "        float band=smoothstep(rin,rin*1.25,rc)*(1.0-smoothstep(rout*0.70,rout,rc));\n"
 "        float phi=atan(dot(xc,e2),xc.x),turns=phi/6.2831853,kep=pow(rin/rc,1.5);\n"
 "        float gloc=sqrt(max(1.0-1.5/rc,0.02));\n"
-"        float swirl=rc*L.wind*0.12-rotationPhase*kep*gloc*dil;\n"
+"        float swirl=rc*L.wind*0.12-rotationPhase*kep*gloc*dil*sdir;\n"
 "        vec2 streakA=vec2(rc*2.8,turns*19.0+swirl*3.0);\n"
 "        vec2 streakB=vec2(rc*1.0,turns*9.0+swirl*1.5+7.0);\n"
 "        float dKep=-1.5*kep/rc;\n"
 "        float dGloc=0.75/(rc*rc*max(gloc,1e-3));\n"
-"        float dSwirl=0.12*L.wind-rotationPhase*dil*(dKep*gloc+kep*dGloc);\n"
+"        float dSwirl=0.12*L.wind-rotationPhase*dil*sdir*(dKep*gloc+kep*dGloc);\n"
 "        float footprintA=diskNoiseFootprint(2.8,19.0,3.0,rc,dSwirl,b,W);\n"
 "        float footprintB=diskNoiseFootprint(1.0,9.0,1.5,rc,dSwirl,b,W);\n"
+"        // The impact-parameter footprint is least exact in the bright inner\n"
+"        // annulus. Filter only partially unresolved fine streaks there.\n"
+"        float innerRing=1.0-smoothstep(1.15*rin,1.70*rin,rc);\n"
+"        float partialUnresolved=smoothstep(0.15,0.45,max(footprintA,footprintB));\n"
+"        float ringLodBoost=1.0+1.25*innerRing*partialUnresolved;\n"
+"        footprintA*=ringLodBoost;footprintB*=ringLodBoost;\n"
 "        float streaks=filteredVnoiseWrapY(streakA,19.0,footprintA)*0.65\n"
 "                     +filteredVnoiseWrapY(streakB,9.0,footprintB)*0.35;\n"
 "        streaks=0.35+L.contr*streaks*streaks;\n"
+"        float macroCycle=floor(iTime/MACRO_CYCLE_SEC);\n"
+"        float macroTime=mod(iTime,MACRO_CYCLE_SEC);\n"
+"        float macroLife=smoothstep(0.0,MACRO_FADE_SEC,macroTime)\n"
+"                       *(1.0-smoothstep(MACRO_CYCLE_SEC-MACRO_FADE_SEC,MACRO_CYCLE_SEC,macroTime));\n"
+"        float macroRotation=macroTime*DRIFT_SPEED*abs(L.speed);\n"
+"        float macroSwirl=rc*L.wind*0.12-macroRotation*kep*gloc*dil*sdir;\n"
+"        float dMacroSwirl=0.12*L.wind-macroRotation*dil*sdir*(dKep*gloc+kep*dGloc);\n"
+"        float macroFootprint=diskNoiseFootprint(1.0/max(rout-rin,0.5),1.0,0.12,rc,dMacroSwirl,b,W);\n"
+"        float macroDetail=1.0-smoothstep(0.020,0.075,macroFootprint);\n"
+"        float macroSeed=hash21(vec2(macroCycle,17.0));\n"
+"        float macroDensity=diskMacroDensity(rc,turns,macroSwirl,rin,rout,macroSeed,macroLife*macroDetail);\n"
 "        vec3 gasdir=normalize(cross(n,xc))*sdir;\n"
 "        float beta=clamp(inversesqrt(max(2.0*(rc-1.0),0.2)),0.0,0.99);\n"
 "        float g2=gloc/max(1.0+beta*dot(gasdir,normalize(v)),0.05);g2=mix(1.0,g2,L.dopp);\n"
 "        float xpr=max(1.0-sqrt(rin/rc),0.0);\n"
 "        float tprof=pow(rin/rc,0.75)*pow(xpr,0.25)/0.488;\n"
 "        vec3 cbb=blackbody(L.temp*tprof*g2);float boost=pow(g2,L.beam);\n"
-"        float density=band*streaks;\n"
+"        float density=band*streaks*macroDensity;\n"
 "        emitc+=trans*cbb*(L.gain*2.2*density*tprof*tprof*boost);\n"
 "        trans*=1.0-clamp(L.opac*density,0.0,1.0);\n"
 "    }}\n"
@@ -294,11 +364,11 @@ static const char* shaderSource =
 "  if(!captured){vec3 d=normalize(v);bg+=stars(d)*L.star*window*shield;\n"
 "    if(d.z<-0.05){float tpl=(-LENS_DEPTH-x.z)/d.z;vec3 hp=x+d*tpl;\n"
 "      vec2 q=rot(hp.xy,-L.roll)/W,sp=vec2(q.x,-q.y);\n"
-"      vec2 suv=mirrorUV(center+(p+(sp-p)*window*shield)/vec2(aspect,1.0));\n"
-"      float toward=smoothstep(0.05,0.35,-d.z);bg+=spaceBackground(suv)*toward;\n"
+"      vec2 suv=center+(p+(sp-p)*window*shield)/vec2(aspect,1.0);\n"
+"      float toward=smoothstep(0.05,0.35,-d.z);bg+=backgroundSource(suv)*toward;\n"
 "  }}\n"
 "  vec3 col=bg*trans+(vec3(1.0)-exp(-emitc*L.expo));\n"
-"  fragColor=vec4(col,1.0);\n"
+"  fragColor=vec4(mix(plainBg,col,sceneVis),1.0);\n"
 "}\n"
 "out vec4 _fragOut;\n"
 "void main(){vec4 c;mainImage(c,gl_FragCoord.xy);_fragOut=c;}\n";
@@ -323,10 +393,8 @@ static const char* fragHeader =
 "uniform float uStarGain;\n"
 "uniform float uDiskOpacity;\n"
 "uniform float uDoppler;\n"
-"\n"
-"float STAR_GAIN_V;\n"
-"float DISK_OPACITY_V;\n"
-"float DOPPLER_MIX_V;\n";
+"uniform float uSceneSeed;\n"
+"\n";
 
 // ============================================================ GL helpers ==
 // GL extension function pointer types
@@ -343,6 +411,9 @@ typedef void (APIENTRY *PFNGLUSEPROGRAMPROC)(GLuint);
 typedef GLint (APIENTRY *PFNGLGETUNIFORMLOCATIONPROC)(GLuint, const GLchar*);
 typedef void (APIENTRY *PFNGLUNIFORM1FPROC)(GLint, GLfloat);
 typedef void (APIENTRY *PFNGLUNIFORM2FPROC)(GLint, GLfloat, GLfloat);
+typedef GLsync (APIENTRY *PFNGLFENCESYNCPROC)(GLenum, GLbitfield);
+typedef GLenum (APIENTRY *PFNGLCLIENTWAITSYNCPROC)(GLsync, GLbitfield, GLuint64);
+typedef void (APIENTRY *PFNGLDELETESYNCPROC)(GLsync);
 
 #define GL_ARRAY_BUFFER               0x8892
 #define GL_STATIC_DRAW                0x88E4
@@ -382,35 +453,53 @@ static PFNGLUSEPROGRAMPROC          glUseProgram;
 static PFNGLGETUNIFORMLOCATIONPROC  glGetUniformLocation;
 static PFNGLUNIFORM1FPROC           glUniform1f;
 static PFNGLUNIFORM2FPROC           glUniform2f;
+static PFNGLFENCESYNCPROC           p_glFenceSync;
+static PFNGLCLIENTWAITSYNCPROC      p_glClientWaitSync;
+static PFNGLDELETESYNCPROC          p_glDeleteSync;
 
 static GLuint shaderProgram;
-static GLint  uTime, uResolution, uStarGain, uDiskOpacity, uDoppler;
+static GLint  uTime = -1, uResolution = -1, uStarGain = -1, uDiskOpacity = -1, uDoppler = -1, uSceneSeed = -1;
 static GLuint vao;
 
+static void* getGLProc(const char* name) {
+    void* proc = (void*)wglGetProcAddress(name);
+    if (proc == (void*)0x1 || proc == (void*)0x2 || proc == (void*)0x3 ||
+        proc == (void*)(INT_PTR)-1) return NULL;
+    return proc;
+}
+
 static int loadGLFunctions(void) {
-    glCreateShader       = (void*)wglGetProcAddress("glCreateShader");
-    glShaderSource       = (void*)wglGetProcAddress("glShaderSource");
-    glCompileShader      = (void*)wglGetProcAddress("glCompileShader");
-    glGetShaderiv        = (void*)wglGetProcAddress("glGetShaderiv");
-    glGetShaderInfoLog   = (void*)wglGetProcAddress("glGetShaderInfoLog");
-    glCreateProgram      = (void*)wglGetProcAddress("glCreateProgram");
-    glAttachShader       = (void*)wglGetProcAddress("glAttachShader");
-    glLinkProgram        = (void*)wglGetProcAddress("glLinkProgram");
-    glGetProgramiv       = (void*)wglGetProcAddress("glGetProgramiv");
-    glUseProgram         = (void*)wglGetProcAddress("glUseProgram");
-    glGetUniformLocation = (void*)wglGetProcAddress("glGetUniformLocation");
-    glUniform1f          = (void*)wglGetProcAddress("glUniform1f");
-    glUniform2f          = (void*)wglGetProcAddress("glUniform2f");
-    p_glGenVertexArrays    = (void*)wglGetProcAddress("glGenVertexArrays");
-    p_glBindVertexArray    = (void*)wglGetProcAddress("glBindVertexArray");
-    p_glGenBuffers         = (void*)wglGetProcAddress("glGenBuffers");
-    p_glBindBuffer         = (void*)wglGetProcAddress("glBindBuffer");
-    p_glBufferData         = (void*)wglGetProcAddress("glBufferData");
-    p_glEnableVertexAttribArray = (void*)wglGetProcAddress("glEnableVertexAttribArray");
-    p_glVertexAttribPointer    = (void*)wglGetProcAddress("glVertexAttribPointer");
-    p_glGetAttribLocation  = (void*)wglGetProcAddress("glGetAttribLocation");
-    p_glGetProgramInfoLog  = (void*)wglGetProcAddress("glGetProgramInfoLog");
-    return glCreateShader && glCreateProgram && glUseProgram && p_glGenVertexArrays;
+    glCreateShader       = (void*)getGLProc("glCreateShader");
+    glShaderSource       = (void*)getGLProc("glShaderSource");
+    glCompileShader      = (void*)getGLProc("glCompileShader");
+    glGetShaderiv        = (void*)getGLProc("glGetShaderiv");
+    glGetShaderInfoLog   = (void*)getGLProc("glGetShaderInfoLog");
+    glCreateProgram      = (void*)getGLProc("glCreateProgram");
+    glAttachShader       = (void*)getGLProc("glAttachShader");
+    glLinkProgram        = (void*)getGLProc("glLinkProgram");
+    glGetProgramiv       = (void*)getGLProc("glGetProgramiv");
+    glUseProgram         = (void*)getGLProc("glUseProgram");
+    glGetUniformLocation = (void*)getGLProc("glGetUniformLocation");
+    glUniform1f          = (void*)getGLProc("glUniform1f");
+    glUniform2f          = (void*)getGLProc("glUniform2f");
+    p_glFenceSync        = (void*)getGLProc("glFenceSync");
+    p_glClientWaitSync   = (void*)getGLProc("glClientWaitSync");
+    p_glDeleteSync       = (void*)getGLProc("glDeleteSync");
+    p_glGenVertexArrays    = (void*)getGLProc("glGenVertexArrays");
+    p_glBindVertexArray    = (void*)getGLProc("glBindVertexArray");
+    p_glGenBuffers         = (void*)getGLProc("glGenBuffers");
+    p_glBindBuffer         = (void*)getGLProc("glBindBuffer");
+    p_glBufferData         = (void*)getGLProc("glBufferData");
+    p_glEnableVertexAttribArray = (void*)getGLProc("glEnableVertexAttribArray");
+    p_glVertexAttribPointer    = (void*)getGLProc("glVertexAttribPointer");
+    p_glGetAttribLocation  = (void*)getGLProc("glGetAttribLocation");
+    p_glGetProgramInfoLog  = (void*)getGLProc("glGetProgramInfoLog");
+    g_frameSyncReady = p_glFenceSync && p_glClientWaitSync && p_glDeleteSync;
+    return glCreateShader && glShaderSource && glCompileShader && glGetShaderiv &&
+        glGetShaderInfoLog && glCreateProgram && glAttachShader && glLinkProgram &&
+        glGetProgramiv && glUseProgram && glGetUniformLocation && glUniform1f &&
+        glUniform2f && p_glGenVertexArrays && p_glBindVertexArray &&
+        p_glGetProgramInfoLog;
 }
 
 static void getLogPath(char* buf, size_t sz) {
@@ -437,6 +526,20 @@ static GLuint compileShader(GLenum type, const char* src) {
         if (f) { fprintf(f, "COMPILE ERROR (type %d):\n%s\n\n", type, log); fclose(f); }
     }
     return s;
+}
+
+static GLfloat makeSceneSeed(void) {
+    LARGE_INTEGER counter;
+    DWORD seed;
+    counter.QuadPart = 0;
+    QueryPerformanceCounter(&counter);
+    seed = (DWORD)counter.LowPart ^ (DWORD)counter.HighPart ^
+           GetCurrentProcessId() ^ GetTickCount();
+    seed ^= seed << 13;
+    seed ^= seed >> 17;
+    seed ^= seed << 5;
+    // A 24-bit fraction is exactly representable in GLfloat and remains < 1.
+    return (GLfloat)(seed & 0x00ffffffu) * (1.0f / 16777216.0f);
 }
 
 static int initShader(void) {
@@ -472,6 +575,8 @@ static int initShader(void) {
     uStarGain   = glGetUniformLocation(shaderProgram, "uStarGain");
     uDiskOpacity= glGetUniformLocation(shaderProgram, "uDiskOpacity");
     uDoppler    = glGetUniformLocation(shaderProgram, "uDoppler");
+    uSceneSeed  = glGetUniformLocation(shaderProgram, "uSceneSeed");
+    if (uSceneSeed >= 0) glUniform1f(uSceneSeed, g_sceneSeed);
 
     // empty VAO — needed by some drivers even with gl_VertexID
     p_glGenVertexArrays(1, &vao);
@@ -638,6 +743,7 @@ static void showConfigDialog(HINSTANCE hInst) {
 // ============================================================ WGL init ==
 static int initOpenGL(HWND hwnd) {
     hDC = GetDC(hwnd);
+    if (!hDC) return 0;
 
     PIXELFORMATDESCRIPTOR pfd = {0};
     pfd.nSize = sizeof(pfd);
@@ -649,17 +755,15 @@ static int initOpenGL(HWND hwnd) {
     pfd.iLayerType = PFD_MAIN_PLANE;
 
     int pf = ChoosePixelFormat(hDC, &pfd);
-    if (!pf) return 0;
-    SetPixelFormat(hDC, pf, &pfd);
+    if (!pf || !SetPixelFormat(hDC, pf, &pfd)) return 0;
 
     hRC = wglCreateContext(hDC);
-    if (!hRC) return 0;
-    wglMakeCurrent(hDC, hRC);
+    if (!hRC || !wglMakeCurrent(hDC, hRC)) return 0;
 
-    // Try to create a core profile context for GLSL 1.30+
+    // Prefer the GLSL 3.30 core context required by the embedded shader.
     typedef HGLRC (APIENTRY *PFNWGLCREATECONTEXTATTRIBSARBPROC)(HDC, HGLRC, const int*);
     PFNWGLCREATECONTEXTATTRIBSARBPROC wglCreateContextAttribsARB =
-        (void*)wglGetProcAddress("wglCreateContextAttribsARB");
+        (void*)getGLProc("wglCreateContextAttribsARB");
     if (wglCreateContextAttribsARB) {
         int attribs[] = {
             0x2091, 3,  // WGL_CONTEXT_MAJOR_VERSION_ARB = 3
@@ -672,16 +776,118 @@ static int initOpenGL(HWND hwnd) {
             wglMakeCurrent(NULL, NULL);
             wglDeleteContext(hRC);
             hRC = newRC;
-            wglMakeCurrent(hDC, hRC);
+            if (!wglMakeCurrent(hDC, hRC)) return 0;
         }
     }
 
     return loadGLFunctions();
 }
 
+static void shutdownRenderer(void) {
+    g_frameSubmitTick = 0;
+    g_nextFrameEligibleTick = 0;
+    if (hRC && hDC) {
+        if (wglMakeCurrent(hDC, hRC)) {
+            if (g_frameFence && p_glDeleteSync) p_glDeleteSync(g_frameFence);
+            g_frameFence = NULL;
+        } else {
+            g_frameFence = NULL;
+        }
+        wglMakeCurrent(NULL, NULL);
+        wglDeleteContext(hRC);
+        hRC = NULL;
+    }
+    if (hDC && hWnd) {
+        ReleaseDC(hWnd, hDC);
+        hDC = NULL;
+    }
+}
+
 // ============================================================ screensaver proc ==
-static void renderFrame(void) {
-    DWORD now = GetTickCount();
+static void completeFrameSchedule(ULONGLONG completedTick) {
+    ULONGLONG elapsed = 0;
+    ULONGLONG cooldown = 0;
+    if (g_frameSubmitTick && completedTick >= g_frameSubmitTick)
+        elapsed = completedTick - g_frameSubmitTick;
+
+    // A completion observed within two timer periods is already governed by
+    // the 100 fps cap. Longer frames get enough rest to avoid continuous GPU
+    // saturation, bounded so a transient stall cannot make the saver inert.
+    if (elapsed > FRAME_COOLDOWN_TRIGGER_MS) {
+        cooldown = elapsed - FRAME_INTERVAL_MS;
+        if (cooldown > FRAME_COOLDOWN_MAX_MS) cooldown = FRAME_COOLDOWN_MAX_MS;
+    }
+    g_frameSubmitTick = 0;
+    g_nextFrameEligibleTick = completedTick + cooldown;
+}
+
+static void resetFrameSchedule(ULONGLONG now) {
+    g_frameSubmitTick = 0;
+    g_nextFrameEligibleTick = now;
+}
+
+static int previousFrameComplete(ULONGLONG now) {
+    GLenum result;
+    if (!g_frameFence) return 1;
+    if (!g_frameSyncReady) {
+        glFinish();
+        g_frameFence = NULL;
+        completeFrameSchedule(GetTickCount64());
+        return 0;
+    }
+    result = p_glClientWaitSync(g_frameFence, 0, 0);
+    if (result == GL_ALREADY_SIGNALED || result == GL_CONDITION_SATISFIED) {
+        p_glDeleteSync(g_frameFence);
+        g_frameFence = NULL;
+        completeFrameSchedule(now);
+        return 0;
+    }
+    if (result == GL_WAIT_FAILED) {
+        p_glDeleteSync(g_frameFence);
+        g_frameFence = NULL;
+        // Fall back to a one-off synchronous wait rather than letting an
+        // unreliable driver build an unbounded queue of ray-march frames.
+        glFinish();
+        completeFrameSchedule(GetTickCount64());
+        return 0;
+    }
+    return 0;
+}
+
+static int presentPreparedFrame(void) {
+    GLsync fence = NULL;
+    ULONGLONG submitTick;
+    if (g_frameSyncReady) fence = p_glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    // Capture the host timestamp after fence creation and before SwapBuffers,
+    // which may itself flush or block on some drivers.
+    submitTick = GetTickCount64();
+    if (!SwapBuffers(hDC)) {
+        if (fence && p_glDeleteSync) p_glDeleteSync(fence);
+        // A failed present does not prove the draw was discarded. Retire the
+        // submitted work synchronously before a later timer can try again.
+        g_frameSubmitTick = submitTick;
+        glFinish();
+        completeFrameSchedule(GetTickCount64());
+        return 0;
+    }
+    if (fence) {
+        g_frameFence = fence;
+        g_frameSubmitTick = submitTick;
+        // Ensure the non-blocking fence is submitted; the next timer tick
+        // skips rendering until this completed frame has retired on the GPU.
+        glFlush();
+    } else {
+        // Compatibility fallback for a driver that exposes GLSL 3.30 but not
+        // the sync entry points: never let it queue more than one frame.
+        g_frameSubmitTick = submitTick;
+        glFinish();
+        completeFrameSchedule(GetTickCount64());
+    }
+    return 1;
+}
+
+static int renderFrame(int present) {
+    ULONGLONG now = GetTickCount64();
     float t = (float)(now - g_tick0) / 1000.0f;
 
     glViewport(0, 0, g_W, g_H);
@@ -702,7 +908,14 @@ static void renderFrame(void) {
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     p_glBindVertexArray(0);
 
-    SwapBuffers(hDC);
+    return present ? presentPreparedFrame() : 1;
+}
+
+static void renderVisibleFrame(void) {
+    ULONGLONG now = GetTickCount64();
+    if (!previousFrameComplete(now)) return;
+    if (now < g_nextFrameEligibleTick) return;
+    renderFrame(1);
 }
 
 static void hideCursor(void) {
@@ -748,23 +961,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         break;
     case WM_CREATE:
-        SetTimer(hwnd, 1, 16, NULL);  // ~60fps
-        g_tick0 = GetTickCount();
+        SetTimer(hwnd, 1, FRAME_INTERVAL_MS, NULL);  // 100 fps submission cap
+        g_tick0 = GetTickCount64();
         GetCursorPos(&g_mousePrev);
-        g_mouseMoved = 1;  // ignore first frame
+        g_mouseMoved = 0;  // ignore the first mouse message after showing the saver
         return 0;
     case WM_TIMER:
         if (!g_preview && shouldExit()) {
             PostQuitMessage(0);
             return 0;
         }
-        renderFrame();
+        renderVisibleFrame();
         return 0;
     case WM_MOUSEMOVE:
         if (!g_preview) {
             POINT pt;
             pt.x = GET_X_LPARAM(lp);
             pt.y = GET_Y_LPARAM(lp);
+            ClientToScreen(hwnd, &pt);
             if (g_mouseMoved) {
                 int dx = pt.x - g_mousePrev.x;
                 int dy = pt.y - g_mousePrev.y;
@@ -800,7 +1014,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 // no args  = configure (settings dialog)
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmdLine, int show) {
-    (void)hPrev; (void)show;
+    (void)hPrev; (void)cmdLine; (void)show;
+    SetProcessDPIAware();  // Primary-screen metrics use physical pixels.
     hInst = hInstance;
     loadConfig();
 
@@ -811,12 +1026,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmdLine, int show
     else { while (*cl && *cl != ' ') cl++; }
     while (*cl == ' ') cl++;
 
-    int isScreensaver = 0;
     int isPreview = 0;
     HWND previewParent = NULL;
 
-    if (_strnicmp(cl, "/s", 2) == 0 && (cl[2] == 0 || cl[2] == ' ')) {
-        isScreensaver = 1;
+    if (_strnicmp(cl, "/s", 2) == 0) {
+        LPSTR end = cl + 2;
+        while (*end == ' ' || *end == '\t') ++end;
+        // Accept only standalone /s, matching the screensaver control-panel contract.
+        if (*end != 0) return 0;
     } else if (_strnicmp(cl, "/p", 2) == 0) {
         isPreview = 1;
         cl += 2;
@@ -830,8 +1047,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmdLine, int show
         // /a = password change — just exit
         return 0;
     } else if (_strnicmp(cl, "/d", 2) == 0) {
-        // debug — run screensaver but not fullscreen
-        isScreensaver = 1;
+        // Debug explicitly uses the same non-preview rendering path as /s.
+        g_preview = 0;
     }
 
     WNDCLASSEXA wc = {0};
@@ -849,18 +1066,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmdLine, int show
     if (isPreview && previewParent) {
         RECT rc;
         GetClientRect(previewParent, &rc);
-        style = WS_CHILD | WS_VISIBLE;
+        style = WS_CHILD;
         g_W = rc.right;
         g_H = rc.bottom;
         hwnd = CreateWindowExA(0, "BlackHoleSCR", "", style,
             0, 0, g_W, g_H, previewParent, NULL, hInstance, NULL);
         g_preview = 1;
     } else {
-        // fullscreen
-        style = WS_POPUP | WS_VISIBLE | WS_EX_TOPMOST;
+        style = WS_POPUP;
         g_W = GetSystemMetrics(SM_CXSCREEN);
         g_H = GetSystemMetrics(SM_CYSCREEN);
-        hwnd = CreateWindowExA(0, "BlackHoleSCR", "", style,
+        hwnd = CreateWindowExA(WS_EX_TOPMOST, "BlackHoleSCR", "", style,
             0, 0, g_W, g_H, NULL, NULL, hInstance, NULL);
         g_fullscreen = 1;
     }
@@ -869,14 +1085,45 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmdLine, int show
     hWnd = hwnd;
 
     if (!initOpenGL(hwnd)) {
+        shutdownRenderer();
+        DestroyWindow(hwnd);
         MessageBoxA(NULL, "OpenGL 3.3+ not available", "Error", MB_OK | MB_ICONERROR);
         return 1;
     }
 
-    if (!initShader()) return 1;
+    // Immutable for this run: it randomizes the four-look tour without
+    // introducing host-side current/next scene state.
+    g_sceneSeed = makeSceneSeed();
+    if (!initShader()) {
+        shutdownRenderer();
+        DestroyWindow(hwnd);
+        return 1;
+    }
+    // Start the self-running drifting tour at a known phase after shader setup.
+    g_tick0 = GetTickCount64();
 
-    if (g_fullscreen) hideCursor();
-    ShowWindow(hwnd, SW_SHOW);
+    // Finish and present one frame while hidden so the topmost popup never
+    // exposes an uninitialized black front buffer. Per-frame work uses a
+    // non-blocking fence.
+    {
+        int initialFramePresented = renderFrame(1);
+        if (!initialFramePresented) {
+            // Never reveal a fullscreen popup with an uninitialized front
+            // buffer. Leaving the display untouched is safer than flashing
+            // black when the driver's hidden present has failed.
+            shutdownRenderer();
+            DestroyWindow(hwnd);
+            return 1;
+        }
+        glFinish();
+        // The hidden first frame is fully retired before display; do not let
+        // it create a cooldown before the first visible update.
+        if (g_frameFence && p_glDeleteSync) p_glDeleteSync(g_frameFence);
+        g_frameFence = NULL;
+        resetFrameSchedule(GetTickCount64());
+        if (g_fullscreen) hideCursor();
+        ShowWindow(hwnd, g_fullscreen ? SW_SHOWNOACTIVATE : SW_SHOW);
+    }
     UpdateWindow(hwnd);
 
     MSG msg;
@@ -886,8 +1133,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmdLine, int show
     }
 
     restoreCursor();
-    wglMakeCurrent(NULL, NULL);
-    if (hRC) wglDeleteContext(hRC);
-    if (hDC) ReleaseDC(hwnd, hDC);
+    shutdownRenderer();
+    DestroyWindow(hwnd);
     return 0;
 }

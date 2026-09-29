@@ -6,7 +6,7 @@
 
 ## 效果
 
-黑洞在屏幕上自由漫游，有机地膨胀和收缩，同时在 8 种吸积盘外观之间平滑切换 — Inferno、Gargantua、M87\* 甜甜圈、Face-on ember、Quasar、Blazar、Pure lens。每 60 秒一个循环，由于基于 hash 的随机化，每次循环都略有不同。
+屏保启动后直接进入近黑色宇宙背景，不会采集、显示或吸入桌面内容。背景保留少量星点及两组小星团；它们的位置每次运行都会随机改变，但在本次运行中稳定，并沿现有光线方向参与引力透镜。四个历史吸积盘外观（近边缘盘、侧视盘、斜视盘与接近正面盘）会在每次运行时随机排序；每 96 秒一轮，每轮各出现一次，且相邻镜头不会重复。每个外观保持约 18 秒，再用约 6 秒平滑过渡至下一外观。黑洞中心和表观尺寸沿受边界约束的缓慢 Lissajous 轨迹连续漂移，而非跳变或无约束漫游。盘内细丝和宏观亮团以较慢的共同时间轴旋转；吸积盘仍叠加低频、可环绕的亮团与暗隙，使物质密度不再只是均匀细条纹。
 
 ## 物理
 
@@ -33,7 +33,7 @@
 
 ## 从源码编译
 
-需要 MSVC（Visual Studio Build Tools）。在 Developer Command Prompt 中：
+需要 MSVC（Visual Studio Build Tools）。`build.bat` 会自动定位已安装的 Visual Studio C++ 工具链，因此可从普通 `cmd.exe` 或资源管理器直接运行；也可在 Developer Command Prompt 中手动编译：
 
 ```bat
 cl /O2 /W3 /nologo /D_CRT_SECURE_NO_WARNINGS /Fe:blackhole.scr ^
@@ -41,15 +41,18 @@ cl /O2 /W3 /nologo /D_CRT_SECURE_NO_WARNINGS /Fe:blackhole.scr ^
     /link /SUBSYSTEM:WINDOWS
 ```
 
-或者直接运行 `build.bat`。
+或者直接运行 `build.bat`；只有在编译真正成功时，它才会覆盖正式的 `blackhole.scr`。
 
 ## 工作原理
 
-单个 C 文件（~30KB）把整个 GLSL fragment shader 作为字符串字面量内嵌。Win32 宿主创建全屏 OpenGL 3.3 上下文，编译着色器，每帧渲染一个全屏 quad。Vertex shader 用 `gl_VertexID` 生成 quad，不需要任何顶点缓冲。
+单个 C 文件把整个 GLSL fragment shader 作为字符串字面量内嵌。Win32 宿主创建全屏 OpenGL 3.3 上下文，编译着色器，每帧渲染一个全屏 quad。Vertex shader 用 `gl_VertexID` 生成 quad，不需要任何顶点缓冲。着色器在四个 `DiskLook` 外观之间平滑插值，并为中心和尺寸提供受边界约束的连续漂移；在盘面交点处独立合成物质密度、温度、Doppler 与束射。
 
 - **零依赖** — 只用 Win32 API + OpenGL
 - **单个 .scr 文件** — 不需要安装器、DLL、注册表条目（屏保设置管理的除外）
 - **配置对话框** — 三个滑块调节视觉效果，存储在 `HKCU\Software\BlackHoleScreensaver`
+- **直接开场** — `/s`、`/p` 和 `/d` 都从程序化近黑宇宙背景及四个漂移外观直接开始，不读取桌面像素
+- **节制的 GPU 负载** — 100 fps 为最大提交频率（10 ms timer）；OpenGL 同步栅栏确保 GPU 忙时丢帧而不是积压完整的光线追踪帧。慢帧完成后会有受限冷却时间，避免持续占满 GPU
+- **缓慢盘面运动** — 吸积盘的细丝与宏观密度共用较慢的时间轴，避免高速、屏幕锁定式旋转
 
 ## 系统要求
 
