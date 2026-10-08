@@ -4,7 +4,7 @@
   "scope": "named-static-schwarzschild-scene",
   "canonicalShader": {
     "path": "blackhole_screensaver.glsl",
-    "sourceSha256": "B193DFF52A2A60D9BFC30EA143C6B77D1B74C404A8005F838A4D5B265B2D5ED5",
+    "sourceSha256": "9501870F336533A3935763705C74B946B163F6DE6924E633C4C7176037809490",
     "generator": "tools/generate-shader-include.ps1",
     "generatedInclude": "generated/blackhole_screensaver_frag.inc"
   },
