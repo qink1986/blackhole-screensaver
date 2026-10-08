@@ -181,6 +181,14 @@ if ($contract.relativeMotion.bodyComposition -ne 'fixed' -or
     $contract.relativeMotion.directionLifetime -ne 'one-direction-per-screensaver-launch') {
     Fail 'Unexpected M6 relative-motion policy'
 }
+if ($contract.weakLensing.blendRangeInBCrit.Count -ne 2 -or
+    [math]::Abs([double]$contract.weakLensing.blendRangeInBCrit[0] - 1.35) -gt 0.000001 -or
+    [math]::Abs([double]$contract.weakLensing.blendRangeInBCrit[1] - 4.00) -gt 0.000001 -or
+    $contract.weakLensing.outerTraceBoundary -ne 'rout+3.0' -or
+    -not [bool]$contract.weakLensing.outerBlendRadiusFitsTraceBoundary -or
+    [int]$contract.weakLensing.geodesicStepBudget -ne 48) {
+    Fail 'Unexpected weak-lensing extent policy'
+}
 if ([int]$contract.frameScheduling.submissionIntervalMs -ne 10 -or
     -not [bool]$contract.frameScheduling.oneFrameFence -or
     [int]$contract.frameScheduling.cooldownDivisor -ne 4 -or
@@ -283,6 +291,8 @@ Require-Contains $acceptance 'direct-sky stars or clusters translate' 'M6 manual
 Require-Contains $acceptance 'gather adjacent procedural' 'M6 lensed-star seam-gather scope'
 Require-Contains $acceptance 'entry/exit flash' 'M6 lensed-star seam-flicker rule'
 Require-Contains $acceptance 'apparent size and must not disappear' 'M6 unchanged-star visual criterion'
+Require-Contains $acceptance '4.00 * B_CRIT' 'M6 weak-lensing outer blend acceptance'
+Require-Contains $acceptance 'without a hard circular transition' 'M6 weak-lensing continuity acceptance'
 Require-Contains $acceptance 'three candidate analytic impact arcs' 'M6 bounded impact-arc count'
 Require-Contains $acceptance 'no 36-second global macro replay' 'M6 no global material replay'
 Require-Contains $acceptance 'visibly radius-dependent shear' 'M6 impact-arc shear acceptance'
@@ -357,6 +367,8 @@ Require-Contains $shaderText 'float innerFlowSkyTransmission=smoothstep(' 'M6 sm
 Require-Contains $shaderText 'B_CRIT*INNER_FLOW_SKY_OCCLUDER_START,B_CRIT*INNER_FLOW_SKY_OCCLUDER_END,b);' 'M6 inner-flow sky occluder bounds'
 Require-Contains $shaderText 'sky*=innerFlowSkyTransmission;' 'M6 sky-only inner-flow occlusion'
 Require-Contains $shaderText 'vec3 col=sky*trans+(vec3(1.0)-exp(-emitc*L.expo));' 'M6 disk emission preserved after sky occlusion'
+Require-Contains $shaderText 'float lensBlend=1.0-smoothstep(B_CRIT*1.35,B_CRIT*4.00,b);' 'Extended weak-lensing blend range'
+Require-Contains $shaderText 'float bmax=rout+3.0;' 'Existing outer lens trace boundary'
 Require-Contains $shaderText 'const float SKY_FLOW_SPEED = 0.0750;' 'Reviewed visible background-flow speed'
 Require-Contains $shaderText 'const float SKY_FLOW_DISTANCE_PER_PHASE = 0.2247;' 'Reviewed world-sky flow distance'
 Require-Contains $shaderText 'vec2 streakA=vec2(rc*2.8,turns*19.0+swirl*3.0);' 'Restored primary disk filament band'

@@ -73,7 +73,9 @@ uses its `uSkySeed` to select one random fixed direction, while the sky still
 does not rotate around the black-hole or screen center. In the
 strong-lensing ring, a parity-reversed secondary star image can move locally
 opposite that direct background flow; this is a qualitative lensing effect,
-not body-following sky motion. `uSkySeed` controls only sky layout/flow;
+not body-following sky motion. Weak deflection remains continuously visible
+out to `4.00 * B_CRIT` within the existing traced domain. `uSkySeed` controls
+only sky layout/flow;
 `uSceneSeed` does not change this M6 scene's position, size, inclination,
 roll, or look, and instead seeds only disk-material impact events.
 

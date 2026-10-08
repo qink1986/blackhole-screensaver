@@ -4,7 +4,7 @@
   "scope": "named-static-schwarzschild-scene-with-impact-arcs-and-slim-disk",
   "canonicalShader": {
     "path": "blackhole_screensaver.glsl",
-    "sourceSha256": "01CA449B8C3263FDD7F382D47A2F1DEBA97E15F7C33D55A3B968966F2185BE6C",
+    "sourceSha256": "939CDCD50282DAD7A45623D221E75AB40D73BDDDC7A52A5F36F882A835F54128",
     "generator": "tools/generate-shader-include.ps1",
     "generatedInclude": "generated/blackhole_screensaver_frag.inc"
   },
@@ -49,6 +49,12 @@
     "flowDistancePerPhase": 0.2247,
     "directionSeed": "uSkySeed",
     "directionLifetime": "one-direction-per-screensaver-launch"
+  },
+  "weakLensing": {
+    "blendRangeInBCrit": [1.35, 4.00],
+    "outerTraceBoundary": "rout+3.0",
+    "outerBlendRadiusFitsTraceBoundary": true,
+    "geodesicStepBudget": 48
   },
   "frameScheduling": {
     "submissionIntervalMs": 10,

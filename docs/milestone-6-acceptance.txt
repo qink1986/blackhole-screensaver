@@ -37,6 +37,10 @@ Preserved behavior
 - uSkySeed remains a sky-layout and sky-flow seed. uSceneSeed does not affect
   position, size, inclination, roll, or look in M6; it seeds only the bounded
   disk-space impact-arc material events.
+- Weak lensing blends continuously from `1.35 * B_CRIT` through
+  `4.00 * B_CRIT`, allowing the weaker outer deflection to remain visible
+  within the existing traced domain; it does not change the fixed 48-step
+  geodesic budget or extend the outer trace boundary.
 - M6 requires visible relative motion: the black-hole composition is fixed
   while the directional background sky translates at `SKY_FLOW_SPEED = 0.0750`
   (50% faster than the prior M6 calibration). `uSkySeed` selects one random
@@ -93,8 +97,10 @@ Manual final M6 gate
    overall disk look remain fixed, while direct-sky stars or clusters translate
    past that fixed body without orbiting it. On a subsequent launch, verify a
    random direction once per screensaver launch is selected; within each run
-   the sky trajectory remains straight. Near the lens ring, a smooth
-   locally reversed secondary image is allowed; stars retain their original
+   the sky trajectory remains straight. Confirm that weak star-field bending
+   remains continuous out to approximately four photon-ring critical radii,
+   without a hard circular transition. Near the lens ring, a smooth locally
+   reversed secondary image is allowed; stars retain their original
    apparent size and must not disappear at a procedural cell edge, show an
    entry/exit flash at the lens boundary, flash for one frame, abruptly turn
    black at a near-tangential exit, teleport, visibly pass through the black
