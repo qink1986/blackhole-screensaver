@@ -23,6 +23,10 @@ const float SKY_FLOW_SPEED = 0.0750;
 const float SKY_FLOW_DISTANCE_PER_PHASE = 0.2247;
 const float WORK_AREA     = 0.0;
 const float DISK_LOD_CRITICAL_GAIN = 150.0000;
+// A finite analytic disk body with deliberately slight, constant thickness.
+// Its contact query never consumes extra geodesic steps.
+const float DISK_HALF_THICKNESS = 0.0350;
+const float DISK_CONTACT_PROBE_DISTANCE = 0.0060;
 // A fixed number of deterministic material events replace the synchronized
 // macro replay. These are disk-space impact arcs, not particles or fluid state.
 const float IMPACT_ARC_SLOT_SECONDS = 11.0000;
@@ -63,6 +67,43 @@ float diskNoiseFootprint(float radialScale,float angularPeriod,float swirlScale,
   float angularFootprint=angularPeriod*rayFootprint/(6.2831853*max(rc,1.0));
   float swirlFootprint=swirlScale*abs(dSwirl)*rayFootprint;
   return max(radialFootprint,length(vec2(angularFootprint,swirlFootprint)));
+}
+// Negative means inside the finite thick disk body. Its center is retained as
+// a non-emissive inner flow, so the same entry rule protects the black cavity.
+float diskBodyField(vec3 point,vec3 normal,float rout){
+  float height=dot(point,normal);
+  vec3 diskPoint=point-normal*height;
+  float rc=length(diskPoint);
+  return max(abs(height)-DISK_HALF_THICKNESS,rc-rout);
+}
+float diskEntryCandidate(vec3 x0,vec3 x1,vec3 normal,float rout,float tc){
+  if(tc<0.0||tc>1.0)return 2.0;
+  float probe=min(0.0200,DISK_CONTACT_PROBE_DISTANCE/max(length(x1-x0),0.0200));
+  float before=diskBodyField(mix(x0,x1,max(0.0,tc-probe)),normal,rout);
+  float after=diskBodyField(mix(x0,x1,min(1.0,tc+probe)),normal,rout);
+  return before>0.0&&after<=0.0?tc:2.0;
+}
+// A bounded analytic chord query finds the two height faces and the outer rim
+// without subdividing the 48-step Schwarzschild integration.
+float diskBodyEntry(vec3 x0,vec3 x1,vec3 normal,float rout){
+  float s0=dot(x0,normal),s1=dot(x1,normal),ds=s1-s0;
+  float entry=2.0;
+  if(abs(ds)>1e-6){
+    entry=min(entry,diskEntryCandidate(x0,x1,normal,rout,(DISK_HALF_THICKNESS-s0)/ds));
+    entry=min(entry,diskEntryCandidate(x0,x1,normal,rout,(-DISK_HALF_THICKNESS-s0)/ds));
+  }
+  vec3 p0=x0-normal*s0,p1=x1-normal*s1,d=p1-p0;
+  float qa=dot(d,d);
+  if(qa>1e-8){
+    float qb=2.0*dot(p0,d),qc=dot(p0,p0)-rout*rout;
+    float discriminant=qb*qb-4.0*qa*qc;
+    if(discriminant>=0.0){
+      float root=sqrt(discriminant);
+      entry=min(entry,diskEntryCandidate(x0,x1,normal,rout,(-qb-root)/(2.0*qa)));
+      entry=min(entry,diskEntryCandidate(x0,x1,normal,rout,(-qb+root)/(2.0*qa)));
+    }
+  }
+  return entry;
 }
 // Each impact descriptor is reconstructed from its slot index and the
 // per-launch material seed. A birth-coordinate radial test makes the feature
@@ -256,31 +297,28 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   float ci=cos(L.incl),si=sin(L.incl);vec3 n=vec3(0.0,si,ci),e2=vec3(0.0,ci,-si);
   float sdir=L.speed<0.0?-1.0:1.0;
   vec3 emitc=vec3(0.0);float trans=1.0;bool captured=false;
-  float sPrev=dot(x,n);vec3 xPrev=x;
+  vec3 xPrev=x;
   for(int i=0;i<N_STEPS;i++){
     float r2=dot(x,x);if(r2<1.0){captured=true;break;}
     if(x.z<-Z0&&v.z<0.0)break;if(r2>4.0*Z0*Z0)break;
     float r=sqrt(r2);float dt=clamp(0.16*r,0.03,1.5);
-    // Resolve grazing intersections with the infinitesimally thin disk plane.
-    float planeRate=dot(v,n);
-    if(sPrev*planeRate<0.0&&abs(planeRate)>1e-3){
-      float tPlane=abs(sPrev)/abs(planeRate);
-      dt=min(dt,1.10*tPlane);
-    }
     vec3 a=-1.5*h2*x/(r2*r2*r);v+=a*(0.5*dt);x+=v*dt;
     r2=dot(x,x);r=sqrt(r2);a=-1.5*h2*x/(r2*r2*r);v+=a*(0.5*dt);
-    float s=dot(x,n);
-    if(s*sPrev<0.0&&trans>0.02){float tc=sPrev/(sPrev-s);vec3 xc=mix(xPrev,x,tc);
-      float rc=length(xc);
+    float diskEntry=diskBodyEntry(xPrev,x,n,rout);
+    // Evaluate once on each outside-to-inside body entry. A paired exit is
+    // ignored, while later entries after a genuine exit remain eligible.
+    if(diskEntry<=1.0&&trans>0.02){vec3 xc=mix(xPrev,x,diskEntry);
+      float diskHeight=dot(xc,n);vec3 diskPoint=xc-n*diskHeight;
+      float rc=length(diskPoint);
       // The truncated emissive disk has a non-emissive plunging region below
-      // rin. It smoothly blocks background at its plane crossing so lensed
-      // stars cannot visibly pass through the dark inner disk circle.
+      // rin. It smoothly blocks background at its thick-body entry so lensed
+      // stars cannot visibly pass through the dark inner disk volume.
       if(rc<rin){
         float innerCavityTransmission=smoothstep(rin*0.82,rin*0.98,rc);
         trans*=innerCavityTransmission;
       }else if(rc<rout){
         float band=smoothstep(rin,rin*1.25,rc)*(1.0-smoothstep(rout*0.70,rout,rc));
-        float phi=atan(dot(xc,e2),xc.x),turns=phi/6.2831853,kep=pow(rin/rc,1.5);
+        float phi=atan(dot(diskPoint,e2),diskPoint.x),turns=phi/6.2831853,kep=pow(rin/rc,1.5);
         float gloc=sqrt(max(1.0-1.5/rc,0.02));
         float swirl=rc*L.wind*0.12-rotationPhase*kep*gloc*dil*sdir;
         vec2 streakA=vec2(rc*2.8,turns*19.0+swirl*3.0);
@@ -302,7 +340,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
                             +diskImpactArc(rc,turns,rin,rout,b,W,sdir,abs(L.speed),impactSlot-1.0)
                             +diskImpactArc(rc,turns,rin,rout,b,W,sdir,abs(L.speed),impactSlot-2.0);
         float impactArcDensity=clamp(1.0+impactArcExcess,1.0,IMPACT_ARC_DENSITY_MAX);
-        vec3 gasdir=normalize(cross(n,xc))*sdir;
+        vec3 gasdir=normalize(cross(n,diskPoint))*sdir;
         float beta=clamp(inversesqrt(max(2.0*(rc-1.0),0.2)),0.0,0.99);
         float g2=gloc/max(1.0+beta*dot(gasdir,normalize(v)),0.05);g2=mix(1.0,g2,L.dopp);
         float xpr=max(1.0-sqrt(rin/rc),0.0);
@@ -312,7 +350,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         emitc+=trans*cbb*(L.gain*2.2*density*tprof*tprof*boost);
         trans*=1.0-clamp(L.opac*density,0.0,1.0);
     }}
-    sPrev=s;xPrev=x;
+    xPrev=x;
   }
   if(!captured&&dot(x,x)<4.0)captured=true;
   // Captured rays remain the hard physical shadow. All other rays have a
@@ -334,7 +372,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec3 sampledWorldDir=normalize(mix(viewWorldDir,lensedWorldDir,skyLensBlend));
     sky=skyRadiance(sampledWorldDir,skyGain,lensStarGather);
   }
-  // Some escaping rays never hit the thin disk plane, so the plane-local
+  // Some escaping rays never enter the slim disk body, so its local
   // plunging occluder cannot hide their background. This smooth ray-space
   // inner-flow silhouette removes stars from the intended black gap while
   // leaving accumulated disk emission untouched.

@@ -5,7 +5,7 @@ Purpose
 M6 replaces the legacy presentation tour with one explicitly named,
 host-owned STATIC_SCHWARZSCHILD scene. The body layout and disk look do not
 tour, breathe, drift, or reset. A bounded deterministic disk-material layer
-may evolve only at traced disk-plane intersections.
+may evolve only at traced intersections with the analytic slim disk body.
 
 Fixed approved scene
 --------------------
@@ -48,8 +48,17 @@ Preserved behavior
   discontinuous teleports are not. A frame in which both the body composition
   and the background remain fixed is not an acceptable M6 result.
 
-Disk material
--------------
+Disk material and geometry
+--------------------------
+- The disk is a finite analytic body with a constant half-thickness of
+  `0.035`. It has upper/lower height faces and an outer rim; it is neither an
+  infinitely thin plane nor a volume ray march.
+- Each existing geodesic chord performs one bounded analytic face/rim query;
+  it does not subdivide or consume the fixed 48-step geodesic budget. A disk
+  contribution occurs only when a ray enters that body from outside. The paired
+  exit does not double emission or opacity, while a later genuine re-entry
+  remains valid. All local material quantities use the contact's normal-
+  projected disk-space coordinate.
 - The disk keeps its continuous wrapped-filament background and adds exactly
   three candidate analytic impact arcs. Each descriptor is reconstructed from
   time and uSceneSeed, so it persists coherently without a texture, particle
@@ -62,9 +71,9 @@ Disk material
   offset and lifetime of 18 to 22 seconds. Only that event fades; the disk has
   no 36-second global macro replay, synchronized fade, or whole-disk reset.
 - The dark region below the truncated emissive inner edge is a non-emissive,
-  smoothly opaque plunging region at a disk-plane crossing. A separate smooth
-  ray-space inner-flow silhouette blocks background-only rays that never cross
-  the thin disk plane. Together they keep stars out of the black gap between
+  smoothly opaque plunging region at a slim-disk-body entry. A separate smooth
+  ray-space inner-flow silhouette blocks background-only rays that never enter
+  the slim disk body. Together they keep stars out of the black gap between
   the photon ring and visible disk without reducing accumulated disk emission;
   the event-horizon shadow remains separate.
 - The existing derivative-free footprint estimate attenuates an unresolved
@@ -91,14 +100,17 @@ Manual final M6 gate
    black at a near-tangential exit, teleport, visibly pass through the black
    inner disk circle, or move normally in the black gap between photon ring and
    visible disk.
-3. Confirm one to three bright short arcs persist at a disk radius, orbit with
+3. Confirm the disk has only a slight stable vertical rim/upper-lower extent,
+   including at its outer edge, without becoming a broad torus or displaying
+   two identical bright layers from its entry and exit boundaries.
+4. Confirm one to three bright short arcs persist at a disk radius, orbit with
    visibly radius-dependent shear, drift inward, and fade independently. New
    arcs must not cause a disk-wide blink, 36-second reset, or common fade; they
    must remain disk-space structures across the lensed primary and secondary
    images rather than screen-space overlays.
-4. Confirm the disk retains the black inner cavity and photon-ring-to-disk gap
+5. Confirm the disk retains the black inner cavity and photon-ring-to-disk gap
    without background stars leaking through.
-5. Run blackhole.scr /p in a Screen Saver Settings preview and confirm the
+6. Run blackhole.scr /p in a Screen Saver Settings preview and confirm the
    same stable composition and deterministic material events are used.
-6. Reply "M6 through" if acceptable, or report the visible motion and time at
+7. Reply "M6 through" if acceptable, or report the visible motion and time at
    which it occurs.

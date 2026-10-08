@@ -1,10 +1,10 @@
 {
   "contract": "blackhole-screensaver-milestone-6",
-  "version": 3,
-  "scope": "named-static-schwarzschild-scene-with-deterministic-impact-arcs",
+  "version": 4,
+  "scope": "named-static-schwarzschild-scene-with-impact-arcs-and-slim-disk",
   "canonicalShader": {
     "path": "blackhole_screensaver.glsl",
-    "sourceSha256": "E1B3E6645EF0711431119841D00E73BBB34C7CB82F675C7FE74BB8E9CDE12AF4",
+    "sourceSha256": "01CA449B8C3263FDD7F382D47A2F1DEBA97E15F7C33D55A3B968966F2185BE6C",
     "generator": "tools/generate-shader-include.ps1",
     "generatedInclude": "generated/blackhole_screensaver_frag.inc"
   },
@@ -95,7 +95,19 @@
     "birthAngularHalfTurnsRange": [0.010, 0.020],
     "globalMacroReplay": "forbidden",
     "baseDisk": "continuous-wrapped-filaments",
-    "rendering": "bounded-density-modulation-at-disk-plane-intersections"
+    "rendering": "bounded-density-modulation-at-slim-disk-entry"
+  },
+  "slimDiskGeometry": {
+    "model": "analytic-finite-constant-thickness-disk-body",
+    "halfThickness": 0.0350,
+    "boundary": "two-height-faces-and-outer-rim",
+    "intersection": "bounded-analytic-chord-query",
+    "entryPolicy": "once-per-outside-to-inside-contiguous-visit",
+    "contactCoordinate": "normal-projected-disk-space",
+    "innerCavity": "non-emissive-entry-occluder",
+    "volumeRayMarching": false,
+    "additionalPasses": 0,
+    "geodesicStepBudget": "unchanged-48-step-loop"
   },
   "host": {
     "path": "blackhole_screensaver.c",

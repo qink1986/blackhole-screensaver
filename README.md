@@ -45,8 +45,8 @@ procedural inertial sky while preserving a fixed, low-overhead runtime budget.
 
 The fragment shader traces a ray from each pixel through a compact
 Schwarzschild-style field. A ray can be captured by the shadow, escape to the
-background sky, or cross the infinitesimally thin disk plane. At a disk hit,
-the renderer combines these separately:
+background sky, or enter a finite, slightly flared analytic disk body. At a
+disk entry, the renderer combines these separately:
 
 - disk density: a non-emissive inner plunging region, wrapped procedural
   disk-space detail, and bounded local impact arcs;
@@ -78,14 +78,18 @@ not body-following sky motion. `uSkySeed` controls only sky layout/flow;
 roll, or look, and instead seeds only disk-material impact events.
 
 Below the truncated emissive inner edge, a non-emissive plunging-region
-occluder smoothly blocks background at disk-plane crossings. A matching smooth
-ray-space inner-flow silhouette blocks background-only rays that never cross
-the thin disk plane. Together they keep lensed stars out of the black gap
+occluder smoothly blocks background when it enters the slim disk body. A
+matching smooth ray-space inner-flow silhouette blocks background-only rays
+that never enter that body. Together they keep lensed stars out of the black gap
 between photon ring and visible disk without altering accumulated disk emission,
 the central shadow, or the one-pass architecture.
 
-The disk remains a bounded procedural density model evaluated at traced
-plane intersections. Its three candidate impact arcs are reconstructed from
+The disk remains a bounded procedural density model evaluated once at each
+outside-to-inside visit of a finite analytic slab. Its constant half-thickness
+is `0.035`, giving a slight rim while preventing paired entry/exit boundaries
+from double-counting material. A bounded analytic chord query tests its faces
+and outer rim without subdividing the fixed 48-step geodesic loop. Its three
+candidate impact arcs are reconstructed from
 elapsed time and the per-launch material seed: each is born at a local radius
 and azimuth, differentially shears through its birth-coordinate orbital phase,
 drifts inward, and fades independently. This creates deterministic temporal

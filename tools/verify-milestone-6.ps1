@@ -167,10 +167,10 @@ try {
 catch {
     Fail "Contract JSON is invalid: $($_.Exception.Message)"
 }
-if ($contract.contract -ne 'blackhole-screensaver-milestone-6' -or [int]$contract.version -ne 3) {
+if ($contract.contract -ne 'blackhole-screensaver-milestone-6' -or [int]$contract.version -ne 4) {
     Fail 'Unexpected contract identity or version'
 }
-if ($contract.scope -ne 'named-static-schwarzschild-scene-with-deterministic-impact-arcs') {
+if ($contract.scope -ne 'named-static-schwarzschild-scene-with-impact-arcs-and-slim-disk') {
     Fail 'Unexpected contract scope'
 }
 if ($contract.relativeMotion.bodyComposition -ne 'fixed' -or
@@ -237,8 +237,20 @@ if ($contract.impactArcMaterial.model -ne 'three-staggered-deterministic-disk-sp
     [math]::Abs([double]$contract.impactArcMaterial.birthAngularHalfTurnsRange[1] - 0.020) -gt 0.000001 -or
     $contract.impactArcMaterial.globalMacroReplay -ne 'forbidden' -or
     $contract.impactArcMaterial.baseDisk -ne 'continuous-wrapped-filaments' -or
-    $contract.impactArcMaterial.rendering -ne 'bounded-density-modulation-at-disk-plane-intersections') {
+    $contract.impactArcMaterial.rendering -ne 'bounded-density-modulation-at-slim-disk-entry') {
     Fail 'Unexpected deterministic impact-arc material policy'
+}
+if ($contract.slimDiskGeometry.model -ne 'analytic-finite-constant-thickness-disk-body' -or
+    [math]::Abs([double]$contract.slimDiskGeometry.halfThickness - 0.0350) -gt 0.000001 -or
+    $contract.slimDiskGeometry.boundary -ne 'two-height-faces-and-outer-rim' -or
+    $contract.slimDiskGeometry.intersection -ne 'bounded-analytic-chord-query' -or
+    $contract.slimDiskGeometry.entryPolicy -ne 'once-per-outside-to-inside-contiguous-visit' -or
+    $contract.slimDiskGeometry.contactCoordinate -ne 'normal-projected-disk-space' -or
+    $contract.slimDiskGeometry.innerCavity -ne 'non-emissive-entry-occluder' -or
+    [bool]$contract.slimDiskGeometry.volumeRayMarching -or
+    [int]$contract.slimDiskGeometry.additionalPasses -ne 0 -or
+    $contract.slimDiskGeometry.geodesicStepBudget -ne 'unchanged-48-step-loop') {
+    Fail 'Unexpected analytic slim-disk geometry policy'
 }
 $sourcePath = Join-Path $ProjectRoot ([string]$contract.host.path)
 $shaderPath = Join-Path $ProjectRoot ([string]$contract.canonicalShader.path)
@@ -275,6 +287,10 @@ Require-Contains $acceptance 'three candidate analytic impact arcs' 'M6 bounded 
 Require-Contains $acceptance 'no 36-second global macro replay' 'M6 no global material replay'
 Require-Contains $acceptance 'visibly radius-dependent shear' 'M6 impact-arc shear acceptance'
 Require-Contains $acceptance 'drift inward, and fade independently' 'M6 impact-arc lifecycle acceptance'
+Require-Contains $acceptance 'finite analytic body with a constant half-thickness' 'M6 slim-disk geometry'
+Require-Contains $acceptance 'does not subdivide or consume the fixed 48-step geodesic budget' 'M6 slim-disk fixed-step preservation'
+Require-Contains $acceptance 'exit does not double emission or opacity' 'M6 slim-disk entry-only integration'
+Require-Contains $acceptance 'slight stable vertical rim/upper-lower extent' 'M6 slim-disk visual acceptance'
 
 $source = [System.IO.File]::ReadAllText($sourcePath, [System.Text.Encoding]::UTF8).Replace("`r`n", "`n").Replace("`r", "`n")
 $shaderBytes = [System.IO.File]::ReadAllBytes($shaderPath)
@@ -301,6 +317,22 @@ Require-Contains $shaderText 'uniform vec4 uDiskLookA;' 'Host-owned static disk 
 Require-Contains $shaderText 'DiskLook L=DiskLook(' 'Static scene disk look consumption'
 Require-Contains $shaderText 'float rh=uApparentRadius;' 'Static apparent radius consumption'
 Require-Contains $shaderText 'vec2 center=uSceneCenter;' 'Static center consumption'
+Require-Contains $shaderText 'const float DISK_HALF_THICKNESS = 0.0350;' 'Slim-disk constant half-thickness'
+Require-Contains $shaderText 'float diskBodyField(vec3 point,vec3 normal,float rout){' 'Finite slim-disk body helper'
+Require-Contains $shaderText 'return max(abs(height)-DISK_HALF_THICKNESS,rc-rout);' 'Slim-disk height-face and outer-rim boundary'
+Require-Contains $shaderText 'float diskEntryCandidate(' 'Slim-disk candidate-entry classifier'
+Require-Contains $shaderText 'float diskBodyEntry(vec3 x0,vec3 x1,vec3 normal,float rout){' 'Slim-disk analytic chord query'
+Require-Contains $shaderText '(DISK_HALF_THICKNESS-s0)/ds' 'Slim-disk upper-face intersection'
+Require-Contains $shaderText '(-DISK_HALF_THICKNESS-s0)/ds' 'Slim-disk lower-face intersection'
+Require-Contains $shaderText 'float discriminant=qb*qb-4.0*qa*qc;' 'Slim-disk outer-rim quadratic'
+Require-Contains $shaderText 'float diskEntry=diskBodyEntry(xPrev,x,n,rout);' 'Slim-disk chord intersection call'
+Require-Contains $shaderText 'if(diskEntry<=1.0&&trans>0.02)' 'Slim-disk outside-to-inside integration'
+Require-Contains $shaderText 'float diskHeight=dot(xc,n);vec3 diskPoint=xc-n*diskHeight;' 'Slim-disk normal-projected contact coordinate'
+Require-Contains $shaderText 'float phi=atan(dot(diskPoint,e2),diskPoint.x)' 'Slim-disk projected azimuth'
+Require-Contains $shaderText 'vec3 gasdir=normalize(cross(n,diskPoint))*sdir;' 'Slim-disk projected orbital direction'
+Require-Contains $shaderText 'xPrev=x;' 'Slim-disk contiguous-chord tracking'
+Require-NotContains $shaderText 'dt=min(dt,1.10*min(tHeight,tRim));' 'Rejected boundary substepping'
+Require-NotContains $shaderText 's*sPrev<0.0' 'Rejected infinitesimal disk-plane crossing'
 Require-Contains $shaderText 'const float IMPACT_ARC_SLOT_SECONDS = 11.0000;' 'Impact-arc stagger interval'
 Require-Contains $shaderText 'const float IMPACT_ARC_LIFETIME_MIN = 18.0000;' 'Impact-arc minimum lifetime'
 Require-Contains $shaderText 'const float IMPACT_ARC_LIFETIME_MAX = 22.0000;' 'Impact-arc maximum lifetime'
