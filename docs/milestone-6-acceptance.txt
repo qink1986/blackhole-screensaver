@@ -4,7 +4,8 @@ Purpose
 -------
 M6 replaces the legacy presentation tour with one explicitly named,
 host-owned STATIC_SCHWARZSCHILD scene. The body layout and disk look do not
-tour, breathe, drift, or reset.
+tour, breathe, drift, or reset. A bounded deterministic disk-material layer
+may evolve only at traced disk-plane intersections.
 
 Fixed approved scene
 --------------------
@@ -34,7 +35,8 @@ Preserved behavior
 - M4 versioned /c configuration behavior and its star brightness, disk
   opacity, and Doppler mapping remain unchanged.
 - uSkySeed remains a sky-layout and sky-flow seed. uSceneSeed does not affect
-  position, size, inclination, roll, or look in M6.
+  position, size, inclination, roll, or look in M6; it seeds only the bounded
+  disk-space impact-arc material events.
 - M6 requires visible relative motion: the black-hole composition is fixed
   while the directional background sky translates at `SKY_FLOW_SPEED = 0.0750`
   (50% faster than the prior M6 calibration). `uSkySeed` selects one random
@@ -48,18 +50,27 @@ Preserved behavior
 
 Disk material
 -------------
-- The disk retains its existing procedural density model. M6 does not add a
-  new disk-material lifecycle, quality tier, texture, particle system, fluid
-  simulation, framebuffer, pass, or user setting.
+- The disk keeps its continuous wrapped-filament background and adds exactly
+  three candidate analytic impact arcs. Each descriptor is reconstructed from
+  time and uSceneSeed, so it persists coherently without a texture, particle
+  buffer, fluid state, framebuffer, pass, or user setting.
+- An arc begins as a short local disk-space ellipse at a seeded birth radius
+  and azimuth. It then drifts inward exponentially while its birth-coordinate
+  radius receives a Kepler-like phase; neighboring radii therefore shear into
+  a curved tail rather than rotating as a rigid screen-space decal.
+- Candidate slots are staggered every 11 seconds, with a per-event birth
+  offset and lifetime of 18 to 22 seconds. Only that event fades; the disk has
+  no 36-second global macro replay, synchronized fade, or whole-disk reset.
 - The dark region below the truncated emissive inner edge is a non-emissive,
   smoothly opaque plunging region at a disk-plane crossing. A separate smooth
   ray-space inner-flow silhouette blocks background-only rays that never cross
   the thin disk plane. Together they keep stars out of the black gap between
   the photon ring and visible disk without reducing accumulated disk emission;
   the event-horizon shadow remains separate.
-- The existing derivative-free footprint estimate suppresses unresolved disk
-  detail at the critical lens ring. This remains procedural disk material, not
-  a particle system, fluid simulation, texture, asset, FBO, or added pass.
+- The existing derivative-free footprint estimate attenuates an unresolved
+  impact arc at the critical lens ring while leaving the baseline disk intact.
+  This remains procedural disk material, not a particle system, fluid
+  simulation, texture, asset, FBO, or added pass.
 
 Explicitly deferred
 -------------------
@@ -68,7 +79,7 @@ Explicitly deferred
 
 Manual final M6 gate
 --------------------
-1. Run blackhole.scr /s and observe the fixed composition and sky motion.
+1. Run blackhole.scr /s and observe at least 45 seconds of the fixed composition and sky motion.
 2. Confirm the black-hole center, apparent radius, disk inclination, roll, and
    overall disk look remain fixed, while direct-sky stars or clusters translate
    past that fixed body without orbiting it. On a subsequent launch, verify a
@@ -80,10 +91,14 @@ Manual final M6 gate
    black at a near-tangential exit, teleport, visibly pass through the black
    inner disk circle, or move normally in the black gap between photon ring and
    visible disk.
-3. Confirm the disk stays attached to the fixed body, has no screen-space
-   overlay artifacts, and retains the black inner cavity and photon-ring-to-disk
-   gap without background stars leaking through.
-4. Run blackhole.scr /p in a Screen Saver Settings preview and confirm the
-   same stable composition is used.
-5. Reply "M6 through" if acceptable, or report the visible motion and time at
+3. Confirm one to three bright short arcs persist at a disk radius, orbit with
+   visibly radius-dependent shear, drift inward, and fade independently. New
+   arcs must not cause a disk-wide blink, 36-second reset, or common fade; they
+   must remain disk-space structures across the lensed primary and secondary
+   images rather than screen-space overlays.
+4. Confirm the disk retains the black inner cavity and photon-ring-to-disk gap
+   without background stars leaking through.
+5. Run blackhole.scr /p in a Screen Saver Settings preview and confirm the
+   same stable composition and deterministic material events are used.
+6. Reply "M6 through" if acceptable, or report the visible motion and time at
    which it occurs.

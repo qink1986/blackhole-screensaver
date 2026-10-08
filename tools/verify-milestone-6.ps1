@@ -167,10 +167,10 @@ try {
 catch {
     Fail "Contract JSON is invalid: $($_.Exception.Message)"
 }
-if ($contract.contract -ne 'blackhole-screensaver-milestone-6' -or [int]$contract.version -ne 2) {
+if ($contract.contract -ne 'blackhole-screensaver-milestone-6' -or [int]$contract.version -ne 3) {
     Fail 'Unexpected contract identity or version'
 }
-if ($contract.scope -ne 'named-static-schwarzschild-scene') {
+if ($contract.scope -ne 'named-static-schwarzschild-scene-with-deterministic-impact-arcs') {
     Fail 'Unexpected contract scope'
 }
 if ($contract.relativeMotion.bodyComposition -ne 'fixed' -or
@@ -218,6 +218,28 @@ if ($contract.innerFlowSkyOccluder.model -ne 'smooth-ray-space-background-occlud
     $contract.innerFlowSkyOccluder.diskEmission -ne 'preserved') {
     Fail 'Unexpected M6 inner-flow sky-occluder policy'
 }
+if ($contract.impactArcMaterial.model -ne 'three-staggered-deterministic-disk-space-impact-arcs' -or
+    $contract.impactArcMaterial.materialSeed -ne 'uSceneSeed' -or
+    $contract.impactArcMaterial.descriptorState -ne 'reconstructed-from-time-and-seed' -or
+    [int]$contract.impactArcMaterial.candidateCount -ne 3 -or
+    [math]::Abs([double]$contract.impactArcMaterial.slotSeconds - 11.0) -gt 0.000001 -or
+    $contract.impactArcMaterial.lifetimeSeconds.Count -ne 2 -or
+    [math]::Abs([double]$contract.impactArcMaterial.lifetimeSeconds[0] - 18.0) -gt 0.000001 -or
+    [math]::Abs([double]$contract.impactArcMaterial.lifetimeSeconds[1] - 22.0) -gt 0.000001 -or
+    $contract.impactArcMaterial.inflow -ne 'exponential-inward' -or
+    [math]::Abs([double]$contract.impactArcMaterial.inflowRate - 0.0100) -gt 0.000001 -or
+    $contract.impactArcMaterial.differentialShear -ne 'birth-radius-dependent-kepler-like-phase' -or
+    $contract.impactArcMaterial.birthRadialRange.Count -ne 2 -or
+    [math]::Abs([double]$contract.impactArcMaterial.birthRadialRange[0] - 0.34) -gt 0.000001 -or
+    [math]::Abs([double]$contract.impactArcMaterial.birthRadialRange[1] - 0.82) -gt 0.000001 -or
+    $contract.impactArcMaterial.birthAngularHalfTurnsRange.Count -ne 2 -or
+    [math]::Abs([double]$contract.impactArcMaterial.birthAngularHalfTurnsRange[0] - 0.010) -gt 0.000001 -or
+    [math]::Abs([double]$contract.impactArcMaterial.birthAngularHalfTurnsRange[1] - 0.020) -gt 0.000001 -or
+    $contract.impactArcMaterial.globalMacroReplay -ne 'forbidden' -or
+    $contract.impactArcMaterial.baseDisk -ne 'continuous-wrapped-filaments' -or
+    $contract.impactArcMaterial.rendering -ne 'bounded-density-modulation-at-disk-plane-intersections') {
+    Fail 'Unexpected deterministic impact-arc material policy'
+}
 $sourcePath = Join-Path $ProjectRoot ([string]$contract.host.path)
 $shaderPath = Join-Path $ProjectRoot ([string]$contract.canonicalShader.path)
 $includePath = Join-Path $ProjectRoot ([string]$contract.canonicalShader.generatedInclude)
@@ -249,6 +271,10 @@ Require-Contains $acceptance 'direct-sky stars or clusters translate' 'M6 manual
 Require-Contains $acceptance 'gather adjacent procedural' 'M6 lensed-star seam-gather scope'
 Require-Contains $acceptance 'entry/exit flash' 'M6 lensed-star seam-flicker rule'
 Require-Contains $acceptance 'apparent size and must not disappear' 'M6 unchanged-star visual criterion'
+Require-Contains $acceptance 'three candidate analytic impact arcs' 'M6 bounded impact-arc count'
+Require-Contains $acceptance 'no 36-second global macro replay' 'M6 no global material replay'
+Require-Contains $acceptance 'visibly radius-dependent shear' 'M6 impact-arc shear acceptance'
+Require-Contains $acceptance 'drift inward, and fade independently' 'M6 impact-arc lifecycle acceptance'
 
 $source = [System.IO.File]::ReadAllText($sourcePath, [System.Text.Encoding]::UTF8).Replace("`r`n", "`n").Replace("`r", "`n")
 $shaderBytes = [System.IO.File]::ReadAllBytes($shaderPath)
@@ -275,7 +301,20 @@ Require-Contains $shaderText 'uniform vec4 uDiskLookA;' 'Host-owned static disk 
 Require-Contains $shaderText 'DiskLook L=DiskLook(' 'Static scene disk look consumption'
 Require-Contains $shaderText 'float rh=uApparentRadius;' 'Static apparent radius consumption'
 Require-Contains $shaderText 'vec2 center=uSceneCenter;' 'Static center consumption'
-Require-Contains $shaderText 'float macroRotation=macroTime*DISK_MATERIAL_RATE*abs(L.speed);' 'Disk material time evolution'
+Require-Contains $shaderText 'const float IMPACT_ARC_SLOT_SECONDS = 11.0000;' 'Impact-arc stagger interval'
+Require-Contains $shaderText 'const float IMPACT_ARC_LIFETIME_MIN = 18.0000;' 'Impact-arc minimum lifetime'
+Require-Contains $shaderText 'const float IMPACT_ARC_LIFETIME_MAX = 22.0000;' 'Impact-arc maximum lifetime'
+Require-Contains $shaderText 'const float IMPACT_ARC_INFLOW_RATE = 0.0100;' 'Impact-arc inward drift rate'
+Require-Contains $shaderText 'float diskImpactArc(' 'Deterministic impact-arc descriptor'
+Require-Contains $shaderText 'float birthCoordinate=radial*exp(IMPACT_ARC_INFLOW_RATE*max(age,0.0));' 'Impact-arc birth-coordinate inward drift'
+Require-Contains $shaderText 'float orbitalPhase=hPhase-age*DISK_MATERIAL_RATE*abs(materialSpeed)*0.12*sampleKep*sampleGloc*sdir;' 'Impact-arc birth-radius differential shear'
+Require-Contains $shaderText 'float impactArcExcess=diskImpactArc(rc,turns,rin,rout,b,W,sdir,abs(L.speed),impactSlot)' 'First impact-arc descriptor'
+Require-Contains $shaderText '+diskImpactArc(rc,turns,rin,rout,b,W,sdir,abs(L.speed),impactSlot-1.0)' 'Second impact-arc descriptor'
+Require-Contains $shaderText '+diskImpactArc(rc,turns,rin,rout,b,W,sdir,abs(L.speed),impactSlot-2.0);' 'Third impact-arc descriptor'
+Require-Contains $shaderText 'float density=band*streaks*impactArcDensity;' 'Impact-arc density consumption'
+Require-NotContains $shaderText 'MACRO_CYCLE_SEC' 'Rejected synchronized macro replay'
+Require-NotContains $shaderText 'MACRO_FADE_SEC' 'Rejected synchronized macro fade'
+Require-NotContains $shaderText 'diskMacroDensity' 'Rejected macro density helper'
 Require-Contains $shaderText 'if(rc<rin){' 'M6 inner-disk plunging-region crossing'
 Require-Contains $shaderText 'float innerCavityTransmission=smoothstep(rin*0.82,rin*0.98,rc);' 'M6 smooth inner-cavity occlusion'
 Require-Contains $shaderText 'trans*=innerCavityTransmission;' 'M6 non-emissive inner-cavity transmission'
@@ -286,11 +325,6 @@ Require-Contains $shaderText 'float innerFlowSkyTransmission=smoothstep(' 'M6 sm
 Require-Contains $shaderText 'B_CRIT*INNER_FLOW_SKY_OCCLUDER_START,B_CRIT*INNER_FLOW_SKY_OCCLUDER_END,b);' 'M6 inner-flow sky occluder bounds'
 Require-Contains $shaderText 'sky*=innerFlowSkyTransmission;' 'M6 sky-only inner-flow occlusion'
 Require-Contains $shaderText 'vec3 col=sky*trans+(vec3(1.0)-exp(-emitc*L.expo));' 'M6 disk emission preserved after sky occlusion'
-Require-Contains $shaderText 'const float MACRO_CYCLE_SEC = 36.0000;' 'Restored disk material cycle'
-Require-Contains $shaderText 'const float MACRO_FADE_SEC = 3.0000;' 'Restored disk material fade'
-Require-Contains $shaderText 'float diskMacroDensity(' 'Restored disk material helper'
-Require-Contains $shaderText 'float macroDensity=diskMacroDensity(rc,turns,macroSwirl,rin,rout,macroSeed,macroLife*macroDetail);' 'Restored disk material density'
-Require-Contains $shaderText 'float density=band*streaks*macroDensity;' 'Restored disk density consumption'
 Require-Contains $shaderText 'const float SKY_FLOW_SPEED = 0.0750;' 'Reviewed visible background-flow speed'
 Require-Contains $shaderText 'const float SKY_FLOW_DISTANCE_PER_PHASE = 0.2247;' 'Reviewed world-sky flow distance'
 Require-Contains $shaderText 'vec2 streakA=vec2(rc*2.8,turns*19.0+swirl*3.0);' 'Restored primary disk filament band'
@@ -300,9 +334,11 @@ Require-NotContains $shaderText 'STAR_LENS_FILTER_GAIN' 'Rejected lensed-star so
 foreach ($legacyToken in @('DEMO_N', 'DEMO_TOUR', 'demoLook', 'demoSize', 'mixLook', 'sceneAt', 'lissa', 'DRIFT_SPEED')) {
     Require-NotContains $shaderText $legacyToken 'Legacy body-presentation path'
 }
-if ([regex]::Matches($shaderText, '\buSceneSeed\b', [System.Text.RegularExpressions.RegexOptions]::CultureInvariant).Count -ne 1) {
-    Fail 'uSceneSeed must not influence the M6 static scene'
+if ([regex]::Matches($shaderText, '\buSceneSeed\b', [System.Text.RegularExpressions.RegexOptions]::CultureInvariant).Count -ne 8) {
+    Fail 'uSceneSeed must be restricted to the uniform and seven impact-arc seed hashes'
 }
+$impactArcBlock = Get-GlslFunctionBlock $shaderText 'diskImpactArc'
+Require-Contains $impactArcBlock 'uSceneSeed' 'Material-only scene seed use'
 foreach ($forbiddenShaderToken in @('fwidth', 'dFdx', 'dFdy', 'sampler2D')) {
     Require-NotContains $shaderText $forbiddenShaderToken 'Derivative-free single-pass shader'
 }

@@ -23,8 +23,15 @@ const float SKY_FLOW_SPEED = 0.0750;
 const float SKY_FLOW_DISTANCE_PER_PHASE = 0.2247;
 const float WORK_AREA     = 0.0;
 const float DISK_LOD_CRITICAL_GAIN = 150.0000;
-const float MACRO_CYCLE_SEC = 36.0000;
-const float MACRO_FADE_SEC = 3.0000;
+// A fixed number of deterministic material events replace the synchronized
+// macro replay. These are disk-space impact arcs, not particles or fluid state.
+const float IMPACT_ARC_SLOT_SECONDS = 11.0000;
+const float IMPACT_ARC_LIFETIME_MIN = 18.0000;
+const float IMPACT_ARC_LIFETIME_MAX = 22.0000;
+const float IMPACT_ARC_INFLOW_RATE = 0.0100;
+const float IMPACT_ARC_LOD_START = 0.1200;
+const float IMPACT_ARC_LOD_END = 0.7000;
+const float IMPACT_ARC_DENSITY_MAX = 1.72;
 // Ray-space silhouette of the non-emissive inner inflow between the photon
 // ring and visible disk. It blocks only background, never disk emission.
 const float INNER_FLOW_SKY_OCCLUDER_START = 1.4200;
@@ -57,25 +64,40 @@ float diskNoiseFootprint(float radialScale,float angularPeriod,float swirlScale,
   float swirlFootprint=swirlScale*abs(dSwirl)*rayFootprint;
   return max(radialFootprint,length(vec2(angularFootprint,swirlFootprint)));
 }
-float diskBlob(float radial,float phase,float radialCenter,float radialWidth,float phaseCenter,float phaseWidth){
-  float radialWeight=1.0-smoothstep(radialWidth,radialWidth*1.35,abs(radial-radialCenter));
-  float angular=cos(6.2831853*(phase-phaseCenter));
-  float angularEdge=cos(6.2831853*phaseWidth);
-  return radialWeight*smoothstep(angularEdge,1.0,angular);
-}
-float diskMacroDensity(float rc,float turns,float macroSwirl,float rin,float rout,float cycleSeed,float detail){
+// Each impact descriptor is reconstructed from its slot index and the
+// per-launch material seed. A birth-coordinate radial test makes the feature
+// drift inward while phase evaluated at that coordinate supplies shear.
+float diskImpactArc(float rc,float turns,float rin,float rout,float b,float W,float sdir,float materialSpeed,float eventIndex){
+  float hBirth=hash21(vec2(uSceneSeed*17.0,eventIndex+11.0));
+  float hRadius=hash21(vec2(uSceneSeed*29.0,eventIndex+23.0));
+  float hPhase=hash21(vec2(uSceneSeed*43.0,eventIndex+37.0));
+  float hWidth=hash21(vec2(uSceneSeed*59.0,eventIndex+47.0));
+  float hLife=hash21(vec2(uSceneSeed*71.0,eventIndex+61.0));
+  float birthTime=eventIndex*IMPACT_ARC_SLOT_SECONDS
+                 +mix(0.12,0.78,hBirth)*IMPACT_ARC_SLOT_SECONDS;
+  float age=iTime-birthTime;
+  float lifetime=mix(IMPACT_ARC_LIFETIME_MIN,IMPACT_ARC_LIFETIME_MAX,hLife);
+  float birth=smoothstep(0.0,1.50,age);
+  float dissipation=1.0-smoothstep(lifetime-4.50,lifetime,age);
+  float life=birth*dissipation*step(0.0,age);
   float radial=clamp((rc-rin)/max(rout-rin,0.5),0.0,1.0);
-  float phase=turns+macroSwirl*0.12;
-  float p0=fract(0.08+cycleSeed*0.37),p1=fract(0.43+cycleSeed*0.61);
-  float p2=fract(0.71+cycleSeed*0.83),p3=fract(0.86+cycleSeed*0.29);
-  float density=1.0;
-  density+=0.38*diskBlob(radial,phase,0.20,0.13,p0,0.10);
-  density+=0.31*diskBlob(radial,phase,0.48,0.17,p1,0.13);
-  density+=0.27*diskBlob(radial,phase,0.76,0.12,p2,0.09);
-  density+=0.18*diskBlob(radial,phase,0.35,0.10,p3,0.07);
-  density-=0.25*diskBlob(radial,phase,0.62,0.20,fract(p0+0.12),0.12);
-  density-=0.18*diskBlob(radial,phase,0.27,0.12,fract(p1+0.20),0.10);
-  return mix(1.0,clamp(density,0.48,1.72),detail);
+  float birthRadius=mix(0.34,0.82,hRadius);
+  float birthCoordinate=radial*exp(IMPACT_ARC_INFLOW_RATE*max(age,0.0));
+  float sampleRadius=rin+birthCoordinate*(rout-rin);
+  float sampleKep=pow(rin/max(sampleRadius,rin),1.5);
+  float sampleGloc=sqrt(max(1.0-1.5/max(sampleRadius,1.6),0.02));
+  float orbitalPhase=hPhase-age*DISK_MATERIAL_RATE*abs(materialSpeed)*0.12*sampleKep*sampleGloc*sdir;
+  float radialWidth=mix(0.035,0.065,hWidth);
+  float angularWidth=mix(0.010,0.020,hash21(vec2(uSceneSeed*83.0,eventIndex+73.0)));
+  float turnDelta=fract(turns-orbitalPhase+0.5)-0.5;
+  vec2 local=vec2((birthCoordinate-birthRadius)/radialWidth,turnDelta/angularWidth);
+  float arc=1.0-smoothstep(1.0,1.32,length(local));
+  float radialScale=1.0/(max(rout-rin,0.5)*radialWidth);
+  float phaseScale=1.0/max(angularWidth,0.003);
+  float footprint=diskNoiseFootprint(radialScale,phaseScale,0.0,rc,0.0,b,W);
+  float resolved=1.0-smoothstep(IMPACT_ARC_LOD_START,IMPACT_ARC_LOD_END,footprint);
+  float amplitude=mix(0.28,0.52,hash21(vec2(uSceneSeed*97.0,eventIndex+89.0)));
+  return life*resolved*arc*amplitude;
 }
 vec2 rot(vec2 v,float a){float c=cos(a),s=sin(a);return vec2(c*v.x-s*v.y,s*v.x+c*v.y);}
 vec3 blackbody(float T){
@@ -265,13 +287,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         vec2 streakB=vec2(rc*1.0,turns*9.0+swirl*1.5+7.0);
         float dKep=-1.5*kep/rc;
         float dGloc=0.75/(rc*rc*max(gloc,1e-3));
-        float macroCycle=floor(iTime/MACRO_CYCLE_SEC);
-        float macroTime=mod(iTime,MACRO_CYCLE_SEC);
-        float macroRotation=macroTime*DISK_MATERIAL_RATE*abs(L.speed);
-        float macroSwirl=rc*L.wind*0.12-macroRotation*kep*gloc*dil*sdir;
-        float dMacroSwirl=0.12*L.wind-macroRotation*dil*sdir*(dKep*gloc+kep*dGloc);
-        float footprintA=diskNoiseFootprint(2.8,19.0,3.0,rc,dMacroSwirl,b,W);
-        float footprintB=diskNoiseFootprint(1.0,9.0,1.5,rc,dMacroSwirl,b,W);
+        float dSwirl=0.12*L.wind-rotationPhase*dil*sdir*(dKep*gloc+kep*dGloc);
+        float footprintA=diskNoiseFootprint(2.8,19.0,3.0,rc,dSwirl,b,W);
+        float footprintB=diskNoiseFootprint(1.0,9.0,1.5,rc,dSwirl,b,W);
         float innerRing=1.0-smoothstep(1.15*rin,1.70*rin,rc);
         float partialUnresolved=smoothstep(0.15,0.45,max(footprintA,footprintB));
         float ringLodBoost=1.0+1.25*innerRing*partialUnresolved;
@@ -279,19 +297,18 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         float streaks=filteredVnoiseWrapY(streakA,19.0,footprintA)*0.65
                      +filteredVnoiseWrapY(streakB,9.0,footprintB)*0.35;
         streaks=0.35+L.contr*streaks*streaks;
-        float macroLife=smoothstep(0.0,MACRO_FADE_SEC,macroTime)
-                       *(1.0-smoothstep(MACRO_CYCLE_SEC-MACRO_FADE_SEC,MACRO_CYCLE_SEC,macroTime));
-        float macroFootprint=diskNoiseFootprint(1.0/max(rout-rin,0.5),1.0,0.12,rc,dMacroSwirl,b,W);
-        float macroDetail=1.0-smoothstep(0.020,0.075,macroFootprint);
-        float macroSeed=hash21(vec2(macroCycle,17.0));
-        float macroDensity=diskMacroDensity(rc,turns,macroSwirl,rin,rout,macroSeed,macroLife*macroDetail);
+        float impactSlot=floor(iTime/IMPACT_ARC_SLOT_SECONDS);
+        float impactArcExcess=diskImpactArc(rc,turns,rin,rout,b,W,sdir,abs(L.speed),impactSlot)
+                            +diskImpactArc(rc,turns,rin,rout,b,W,sdir,abs(L.speed),impactSlot-1.0)
+                            +diskImpactArc(rc,turns,rin,rout,b,W,sdir,abs(L.speed),impactSlot-2.0);
+        float impactArcDensity=clamp(1.0+impactArcExcess,1.0,IMPACT_ARC_DENSITY_MAX);
         vec3 gasdir=normalize(cross(n,xc))*sdir;
         float beta=clamp(inversesqrt(max(2.0*(rc-1.0),0.2)),0.0,0.99);
         float g2=gloc/max(1.0+beta*dot(gasdir,normalize(v)),0.05);g2=mix(1.0,g2,L.dopp);
         float xpr=max(1.0-sqrt(rin/rc),0.0);
         float tprof=pow(rin/rc,0.75)*pow(xpr,0.25)/0.488;
         vec3 cbb=blackbody(L.temp*tprof*g2);float boost=pow(g2,L.beam);
-        float density=band*streaks*macroDensity;
+        float density=band*streaks*impactArcDensity;
         emitc+=trans*cbb*(L.gain*2.2*density*tprof*tprof*boost);
         trans*=1.0-clamp(L.opac*density,0.0,1.0);
     }}

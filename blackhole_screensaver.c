@@ -769,8 +769,8 @@ static void uploadSceneState(const SceneState* state) {
     if (uDiskOpacity >= 0) glUniform1f(uDiskOpacity, state->diskOpacity);
     if (uDoppler >= 0)     glUniform1f(uDoppler, state->doppler);
     if (uSceneSeed >= 0)   glUniform1f(uSceneSeed, state->sceneSeed);
-    // M6 retains sceneSeed as a future material-only seed. The static scene
-    // itself never reads it for center, radius, inclination, roll, or look.
+    // sceneSeed controls only deterministic disk-material impact events. The
+    // static scene never reads it for center, radius, inclination, roll, or look.
     if (uSkySeed >= 0)     glUniform1f(uSkySeed, state->skySeed);
     if (uSceneCenter >= 0) glUniform2f(uSceneCenter, state->scene.centerX, state->scene.centerY);
     if (uApparentRadius >= 0) glUniform1f(uApparentRadius, state->scene.apparentRadius);
@@ -982,7 +982,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmdLine, int show
 
     // Separate immutable run seeds are owned by the host. The active shader
     // uses skySeed for its per-launch catalogue, offset, and flow direction;
-    // sceneSeed remains reserved for a future material-only variation.
+    // sceneSeed selects only deterministic disk-material impact events.
     g_sceneSeed = makeSceneSeed();
     g_skySeed = makeSceneSeed();
     if (!initShader()) {

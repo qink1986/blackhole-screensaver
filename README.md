@@ -32,9 +32,9 @@ procedural inertial sky while preserving a fixed, low-overhead runtime budget.
   sky; stable escaping rays retain full deflection rather than switching at a
   binary ray-exit threshold.
 - **Procedural accretion disk** — one named, fixed Schwarzschild-style scene
-  holds its camera/body composition while the existing disk-space density,
-  temperature, Doppler response, and opacity evolve only within the traced
-  disk-plane intersections.
+  holds its camera/body composition while continuous disk-space detail and a
+  few deterministic local impact arcs evolve only within traced disk-plane
+  intersections.
 - **GPU back-pressure** — a 10 ms timer is a maximum submission cadence, not a
   frame-rate promise. A single OpenGL fence allows at most one frame in flight;
   busy GPUs skip work rather than queueing full ray-traced frames.
@@ -48,8 +48,8 @@ Schwarzschild-style field. A ray can be captured by the shadow, escape to the
 background sky, or cross the infinitesimally thin disk plane. At a disk hit,
 the renderer combines these separately:
 
-- disk density: a non-emissive inner plunging region and wrapped procedural
-  disk-space density;
+- disk density: a non-emissive inner plunging region, wrapped procedural
+  disk-space detail, and bounded local impact arcs;
 - temperature: a thin-disk-inspired radial profile;
 - gravitational and Doppler terms: a stylized redshift/beaming response; and
 - transmittance: opacity accumulated at disk crossings.
@@ -75,7 +75,7 @@ strong-lensing ring, a parity-reversed secondary star image can move locally
 opposite that direct background flow; this is a qualitative lensing effect,
 not body-following sky motion. `uSkySeed` controls only sky layout/flow;
 `uSceneSeed` does not change this M6 scene's position, size, inclination,
-roll, or look.
+roll, or look, and instead seeds only disk-material impact events.
 
 Below the truncated emissive inner edge, a non-emissive plunging-region
 occluder smoothly blocks background at disk-plane crossings. A matching smooth
@@ -85,8 +85,12 @@ between photon ring and visible disk without altering accumulated disk emission,
 the central shadow, or the one-pass architecture.
 
 The disk remains a bounded procedural density model evaluated at traced
-plane intersections. It does not add a particle system, fluid simulation,
-texture, framebuffer, pass, or user setting.
+plane intersections. Its three candidate impact arcs are reconstructed from
+elapsed time and the per-launch material seed: each is born at a local radius
+and azimuth, differentially shears through its birth-coordinate orbital phase,
+drifts inward, and fades independently. This creates deterministic temporal
+coherence without a particle system, fluid simulation, texture, framebuffer,
+pass, or user setting.
 
 The three `/c` settings are stored under
 `HKCU\Software\BlackHoleScreensaver`:
