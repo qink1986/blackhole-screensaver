@@ -16,6 +16,8 @@ Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 public static class Milestone4ConfigNative {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int Left, Top, Right, Bottom; }
     [DllImport("user32.dll", CharSet = CharSet.Ansi)]
     public static extern IntPtr FindWindow(string className, string windowName);
     [DllImport("user32.dll")]
@@ -24,6 +26,12 @@ public static class Milestone4ConfigNative {
     public static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")]
     public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")]
+    public static extern bool GetClientRect(IntPtr hWnd, out RECT rect);
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+    [DllImport("user32.dll")]
+    public static extern int MapWindowPoints(IntPtr from, IntPtr to, ref RECT rect, uint points);
 }
 '@
 
@@ -133,6 +141,26 @@ function Assert-Sliders([IntPtr]$window, [int]$star, [int]$disk, [int]$doppler) 
     Assert-Equal (Get-SliderPosition $window $CFG_ID_DOPPLER_SLIDER) $doppler 'Doppler slider'
 }
 
+function Assert-ConfigLayout([IntPtr]$window) {
+    $client = New-Object Milestone4ConfigNative+RECT
+    if (-not [Milestone4ConfigNative]::GetClientRect($window, [ref]$client)) {
+        Fail 'Could not read the configuration client rectangle'
+    }
+    foreach ($controlId in 201..211) {
+        $control = [Milestone4ConfigNative]::GetDlgItem($window, $controlId)
+        if ($control -eq [IntPtr]::Zero) { Fail "Configuration control $controlId is missing" }
+        $rect = New-Object Milestone4ConfigNative+RECT
+        if (-not [Milestone4ConfigNative]::GetWindowRect($control, [ref]$rect)) {
+            Fail "Could not read configuration control $controlId rectangle"
+        }
+        [void][Milestone4ConfigNative]::MapWindowPoints([IntPtr]::Zero, $window, [ref]$rect, 2)
+        if ($rect.Left -lt 0 -or $rect.Top -lt 0 -or
+            $rect.Right -gt $client.Right -or $rect.Bottom -gt $client.Bottom) {
+            Fail "Configuration control $controlId is outside the client area"
+        }
+    }
+}
+
 function Wait-ForExit([System.Diagnostics.Process]$process, [string]$label) {
     if (-not $process.WaitForExit(5000)) {
         Fail "$label did not exit"
@@ -168,6 +196,7 @@ try {
     Clear-TestKey
     $config = Start-Config
     Assert-Sliders $config.Window 30 90 60
+    Assert-ConfigLayout $config.Window
     Close-Config $config
     if (Test-Path -LiteralPath $registryProviderKey) {
         Fail 'Missing-key fallback unexpectedly created a registry key'

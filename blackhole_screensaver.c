@@ -476,6 +476,24 @@ static int saveConfig(const ConfigValues* config) {
 #define CFG_ID_OK            210
 #define CFG_ID_CANCEL        211
 #define CFG_WND_CLASS "BlackHoleConfig"
+#define CFG_BASE_DPI 96
+#define CFG_CLIENT_WIDTH 440
+#define CFG_CLIENT_HEIGHT 190
+
+static UINT configSystemDpi(void) {
+    HDC screen = GetDC(NULL);
+    UINT dpi = CFG_BASE_DPI;
+    if (screen) {
+        int systemDpi = GetDeviceCaps(screen, LOGPIXELSX);
+        ReleaseDC(NULL, screen);
+        if (systemDpi > 0) dpi = (UINT)systemDpi;
+    }
+    return dpi;
+}
+
+static int cfgScale(int logicalPixels, UINT dpi) {
+    return MulDiv(logicalPixels, (int)dpi, CFG_BASE_DPI);
+}
 
 static void cfgUpdateLabel(HWND hwnd, int sliderId, int valId) {
     char buf[8];
@@ -488,45 +506,44 @@ static LRESULT CALLBACK ConfigWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_CREATE: {
         HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        // --- labels ---
+        UINT dpi = configSystemDpi();
+        // The logical layout scales with the process's system-DPI coordinate
+        // space, so its controls remain within the explicitly sized client area.
         HWND h;
-        h = CreateWindowA("STATIC", "Star Brightness:", WS_CHILD | WS_VISIBLE, 20, 20, 110, 20, hwnd, (HMENU)(intptr_t)CFG_ID_STAR_LABEL, NULL, NULL);
+        h = CreateWindowA("STATIC", "Star Brightness:", WS_CHILD | WS_VISIBLE, cfgScale(20, dpi), cfgScale(20, dpi), cfgScale(110, dpi), cfgScale(20, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_STAR_LABEL, NULL, NULL);
         SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
-        h = CreateWindowA("STATIC", "Disk Opacity:", WS_CHILD | WS_VISIBLE, 20, 60, 110, 20, hwnd, (HMENU)(intptr_t)CFG_ID_DISK_LABEL, NULL, NULL);
+        h = CreateWindowA("STATIC", "Disk Opacity:", WS_CHILD | WS_VISIBLE, cfgScale(20, dpi), cfgScale(60, dpi), cfgScale(110, dpi), cfgScale(20, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_DISK_LABEL, NULL, NULL);
         SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
-        h = CreateWindowA("STATIC", "Doppler Effect:", WS_CHILD | WS_VISIBLE, 20, 100, 110, 20, hwnd, (HMENU)(intptr_t)CFG_ID_DOPPLER_LABEL, NULL, NULL);
+        h = CreateWindowA("STATIC", "Doppler Effect:", WS_CHILD | WS_VISIBLE, cfgScale(20, dpi), cfgScale(100, dpi), cfgScale(110, dpi), cfgScale(20, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_DOPPLER_LABEL, NULL, NULL);
         SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
-        // --- trackbars ---
         h = CreateWindowA(TRACKBAR_CLASSA, "", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS | TBS_TOOLTIPS,
-            140, 16, 200, 30, hwnd, (HMENU)(intptr_t)CFG_ID_STAR_SLIDER, NULL, NULL);
+            cfgScale(140, dpi), cfgScale(16, dpi), cfgScale(200, dpi), cfgScale(30, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_STAR_SLIDER, NULL, NULL);
         SendMessage(h, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
         SendMessage(h, TBM_SETPOS, TRUE, cfg_starBrightness);
         SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
         h = CreateWindowA(TRACKBAR_CLASSA, "", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS | TBS_TOOLTIPS,
-            140, 56, 200, 30, hwnd, (HMENU)(intptr_t)CFG_ID_DISK_SLIDER, NULL, NULL);
+            cfgScale(140, dpi), cfgScale(56, dpi), cfgScale(200, dpi), cfgScale(30, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_DISK_SLIDER, NULL, NULL);
         SendMessage(h, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
         SendMessage(h, TBM_SETPOS, TRUE, cfg_diskOpacity);
         SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
         h = CreateWindowA(TRACKBAR_CLASSA, "", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS | TBS_TOOLTIPS,
-            140, 96, 200, 30, hwnd, (HMENU)(intptr_t)CFG_ID_DOPPLER_SLIDER, NULL, NULL);
+            cfgScale(140, dpi), cfgScale(96, dpi), cfgScale(200, dpi), cfgScale(30, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_DOPPLER_SLIDER, NULL, NULL);
         SendMessage(h, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
         SendMessage(h, TBM_SETPOS, TRUE, cfg_doppler);
         SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
-        // --- value labels ---
         char buf[8];
         wsprintfA(buf, "%d", cfg_starBrightness);
-        h = CreateWindowA("STATIC", buf, WS_CHILD | WS_VISIBLE | SS_CENTER, 350, 20, 40, 20, hwnd, (HMENU)(intptr_t)CFG_ID_STAR_VAL, NULL, NULL);
+        h = CreateWindowA("STATIC", buf, WS_CHILD | WS_VISIBLE | SS_CENTER, cfgScale(350, dpi), cfgScale(20, dpi), cfgScale(40, dpi), cfgScale(20, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_STAR_VAL, NULL, NULL);
         SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
         wsprintfA(buf, "%d", cfg_diskOpacity);
-        h = CreateWindowA("STATIC", buf, WS_CHILD | WS_VISIBLE | SS_CENTER, 350, 60, 40, 20, hwnd, (HMENU)(intptr_t)CFG_ID_DISK_VAL, NULL, NULL);
+        h = CreateWindowA("STATIC", buf, WS_CHILD | WS_VISIBLE | SS_CENTER, cfgScale(350, dpi), cfgScale(60, dpi), cfgScale(40, dpi), cfgScale(20, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_DISK_VAL, NULL, NULL);
         SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
         wsprintfA(buf, "%d", cfg_doppler);
-        h = CreateWindowA("STATIC", buf, WS_CHILD | WS_VISIBLE | SS_CENTER, 350, 100, 40, 20, hwnd, (HMENU)(intptr_t)CFG_ID_DOPPLER_VAL, NULL, NULL);
+        h = CreateWindowA("STATIC", buf, WS_CHILD | WS_VISIBLE | SS_CENTER, cfgScale(350, dpi), cfgScale(100, dpi), cfgScale(40, dpi), cfgScale(20, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_DOPPLER_VAL, NULL, NULL);
         SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
-        // --- buttons ---
-        h = CreateWindowA("BUTTON", "OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 240, 140, 80, 28, hwnd, (HMENU)(intptr_t)CFG_ID_OK, NULL, NULL);
+        h = CreateWindowA("BUTTON", "OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, cfgScale(240, dpi), cfgScale(140, dpi), cfgScale(80, dpi), cfgScale(28, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_OK, NULL, NULL);
         SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
-        h = CreateWindowA("BUTTON", "Cancel", WS_CHILD | WS_VISIBLE, 330, 140, 80, 28, hwnd, (HMENU)(intptr_t)CFG_ID_CANCEL, NULL, NULL);
+        h = CreateWindowA("BUTTON", "Cancel", WS_CHILD | WS_VISIBLE, cfgScale(330, dpi), cfgScale(140, dpi), cfgScale(80, dpi), cfgScale(28, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_CANCEL, NULL, NULL);
         SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
         return 0;
     }
@@ -577,11 +594,14 @@ static void showConfigDialog(HINSTANCE hInst) {
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     RegisterClassExA(&wc);
 
-    int w = 440, h = 200;
+    UINT dpi = configSystemDpi();
+    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
+    RECT outer = { 0, 0, cfgScale(CFG_CLIENT_WIDTH, dpi), cfgScale(CFG_CLIENT_HEIGHT, dpi) };
+    AdjustWindowRectEx(&outer, style, FALSE, WS_EX_DLGMODALFRAME);
+    int w = outer.right - outer.left, h = outer.bottom - outer.top;
     int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
     HWND hwnd = CreateWindowExA(WS_EX_DLGMODALFRAME, CFG_WND_CLASS,
-        "BlackHole Screensaver Settings",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        "BlackHole Screensaver Settings", style,
         (sw - w) / 2, (sh - h) / 2, w, h,
         NULL, NULL, hInst, NULL);
     if (!hwnd) return;
