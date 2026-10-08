@@ -21,7 +21,7 @@ procedural inertial sky while preserving a fixed, low-overhead runtime budget.
   sampling, desktop capture, particle system, or runtime asset loading.
 - **Bounded ray integration** — a fixed 48-step Schwarzschild-style path is
   used for the shadow, disk intersections, and local sky deflection.
-- **Directional procedural sky** — a layered deep-star field, compact star
+- **Directional procedural sky** — a denser layered deep-star field, compact star
   clusters, and a faint dust band are seeded once per run. The seed selects one
   random straight world-direction drift per launch, never the black hole's
   center, roll, or size; only escaping rays in the strong-lensing region sample a deflected direction from

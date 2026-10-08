@@ -231,10 +231,10 @@ vec3 stars(vec3 worldDir,float gatherNeighbors){
   vec3 field=vec3(0.0);
   // Four stochastic layers provide a denser deep field without changing the
   // size or energy of an individual catalogue star.
-  field+=cellStars(skyTangent,10.0,0.800,3.0,core*1.18,gatherNeighbors);
-  field+=cellStars(skyTangent,17.0,0.890,19.0,core*0.92,gatherNeighbors);
-  field+=cellStars(skyTangent,27.0,0.945,43.0,core*0.72,gatherNeighbors);
-  field+=cellStars(skyTangent,41.0,0.972,71.0,core*0.58,gatherNeighbors);
+  field+=cellStars(skyTangent,10.0,0.700,3.0,core*1.18,gatherNeighbors);
+  field+=cellStars(skyTangent,17.0,0.840,19.0,core*0.92,gatherNeighbors);
+  field+=cellStars(skyTangent,27.0,0.920,43.0,core*0.72,gatherNeighbors);
+  field+=cellStars(skyTangent,41.0,0.960,71.0,core*0.58,gatherNeighbors);
   float angle=6.2831853*hash21(vec2(uSkySeed*43.0,23.0));
   vec2 offset=(vec2(hash21(vec2(uSkySeed*53.0,11.0)),
                     hash21(vec2(uSkySeed*61.0,31.0)))-0.5)*0.13;
