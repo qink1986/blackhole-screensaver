@@ -2,8 +2,11 @@ name: Build & Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -11,14 +14,25 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Retain full history for the historical M1-M3 acceptance artifacts.
+          fetch-depth: 0
 
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
+      - name: Verify Milestone 6 contract
+        shell: powershell
+        run: .\tools\verify-milestone-6.ps1
+
       - name: Build
         shell: cmd
-        run: cl /O2 /W3 /nologo /D_CRT_SECURE_NO_WARNINGS /Fe:blackhole.scr blackhole_screensaver.c opengl32.lib user32.lib gdi32.lib advapi32.lib shell32.lib comctl32.lib /link /SUBSYSTEM:WINDOWS
+        run: build.bat
+
+      - name: Smoke OpenGL shader compile and link
+        shell: powershell
+        run: .\tools\verify-milestone-6-runtime.ps1 -Executable .\blackhole.scr
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

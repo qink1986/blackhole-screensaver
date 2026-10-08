@@ -1,66 +1,252 @@
-# 黑洞屏保
+# Black Hole Screensaver
 
-一个基于实时光线追踪的 Schwarzschild 黑洞 Windows 屏幕保护程序。
+A standalone Windows screensaver that renders a procedural black-hole scene in
+real time. It is built as one self-contained `.scr` executable: a small Win32
+host creates an OpenGL 3.3 context and renders one full-screen fragment pass.
+The running screensaver does not read desktop pixels, shader files, textures,
+or other external assets.
 
-移植自 [s0xDk/ghostty-blackhole](https://github.com/s0xDk/ghostty-blackhole) — 原本是 Ghostty 终端的着色器，现在是独立的屏保程序，不需要任何终端。
+The project is designed for a cinematic, stable desktop experience rather than
+as a scientific general-relativity simulator. Its current renderer uses a
+Schwarzschild-style null-ray approximation, an analytic accretion disk, and a
+procedural inertial sky while preserving a fixed, low-overhead runtime budget.
 
-## 效果
+## Highlights
 
-屏保启动后直接进入近黑色宇宙背景，不会采集、显示或吸入桌面内容。背景保留少量星点及两组小星团；它们的位置每次运行都会随机改变，但在本次运行中固定。只有黑洞附近的强引力透镜区域才以偏折后的星空替换固定背景，因此星像仅会在该区域发生表观位移、拉伸或遮挡。四个历史吸积盘外观（近边缘盘、侧视盘、斜视盘与接近正面盘）会在每次运行时随机排序；每 96 秒一轮，每轮各出现一次，且相邻镜头不会重复。每个外观保持约 18 秒，再用约 6 秒平滑过渡至下一外观。黑洞中心和表观尺寸沿受边界约束的缓慢 Lissajous 轨迹连续漂移，而非跳变或无约束漫游。盘内细丝和宏观亮团以较慢的共同时间轴旋转；吸积盘仍叠加低频、可环绕的亮团与暗隙，使物质密度不再只是均匀细条纹。
+- **Single-file Windows screensaver** — standard `/s`, `/p`, and `/c` behavior
+  in one `.scr`, with no installer or companion DLL.
+- **OpenGL 3.3 baseline** — compatible with older integrated GPUs, including
+  the Intel UHD-class hardware used for validation.
+- **One full-screen rendering pass** — no FBO, post-processing chain, texture
+  sampling, desktop capture, particle system, or runtime asset loading.
+- **Bounded ray integration** — a fixed 48-step Schwarzschild-style path is
+  used for the shadow, disk intersections, and local sky deflection.
+- **Directional procedural sky** — a layered deep-star field, compact star
+  clusters, and a faint dust band are seeded once per run. The seed selects one
+  random straight world-direction drift per launch, never the black hole's
+  center, roll, or size; only escaping rays in the strong-lensing region sample a deflected direction from
+  that same moving sky. Deflected paths gather adjacent procedural catalogue
+  cells only near a source-cell edge, without changing star size; this prevents
+  a source from flashing or disappearing as it enters or exits the lens.
+  Only truly near-tangential non-captured exits smoothly fall back to direct
+  sky; stable escaping rays retain full deflection rather than switching at a
+  binary ray-exit threshold.
+- **Procedural accretion disk** — one named, fixed Schwarzschild-style scene
+  holds its camera/body composition while the existing disk-space density,
+  temperature, Doppler response, and opacity evolve only within the traced
+  disk-plane intersections.
+- **GPU back-pressure** — a 10 ms timer is a maximum submission cadence, not a
+  frame-rate promise. A single OpenGL fence allows at most one frame in flight;
+  busy GPUs skip work rather than queueing full ray-traced frames.
+- **Safe first presentation** — the first frame is rendered and retired before
+  a full-screen window becomes visible, avoiding an uninitialized black flash.
 
-## 物理
+## What the renderer models
 
-每个像素都在计算自己的 Schwarzschild 零测地线。没有任何东西是"画上去"的 — 一切来自积分：
+The fragment shader traces a ray from each pixel through a compact
+Schwarzschild-style field. A ray can be captured by the shadow, escape to the
+background sky, or cross the infinitesimally thin disk plane. At a disk hit,
+the renderer combines these separately:
 
-- **阴影** — 影响参数低于 `b_crit = (3√3/2) r_s` 的光线落入视界
-- **引力透镜** — 逃逸光线弯曲、放大，在爱因斯坦环内形成镜像
-- **吸积盘** — 开普勒盘 + Shakura–Sunyaev 黑体着色 + 相对论多普勒增亮 + 引力时间膨胀
-- **光子环** — 由绕行 `1.5 r_s` 附近的光线自然涌现，不是画出来的
-- **色差** — 弱场区域蓝色比红色弯曲略多
+- disk density: a non-emissive inner plunging region and wrapped procedural
+  disk-space density;
+- temperature: a thin-disk-inspired radial profile;
+- gravitational and Doppler terms: a stylized redshift/beaming response; and
+- transmittance: opacity accumulated at disk crossings.
 
-## 下载
+The resulting image is a visual approximation. It must not be used for
+scientific measurement, as a Kerr solver, or as a fluid/GRMHD simulation.
 
-从 [最新 Release](https://github.com/gkd2323c/blackhole-screensaver/releases/latest) 下载 `blackhole.scr`。
+## Runtime behavior
 
-## 安装
+The screensaver launches directly into a near-black procedural sky. It never
+captures, uploads, displays, or distorts the desktop.
 
-1. 将 `blackhole.scr` 复制到 `%SYSTEMROOT%\System32\`
-2. 右键桌面 → 个性化 → 锁屏 → 屏幕保护程序设置
-3. 在下拉列表中选择 **Black Hole**
-4. 点击 **设置** 可调整星空亮度、吸积盘透明度、多普勒效应强度
+The active scene is the host-owned `STATIC_SCHWARZSCHILD` composition:
+center `(0.50, 0.50)`, apparent radius `0.120`, disk inclination `1.50 rad`,
+and roll `0.35 rad`. Its camera/body layout and `DiskLook` remain fixed for
+the whole run—there is no preset tour, Lissajous drift, or radius breathing.
+Disk material and the independent directional sky may still evolve. M6
+therefore has explicit relative motion: recognizable sky features translate
+past the fixed black-hole composition at `SKY_FLOW_SPEED = 0.0750`; each launch
+uses its `uSkySeed` to select one random fixed direction, while the sky still
+does not rotate around the black-hole or screen center. In the
+strong-lensing ring, a parity-reversed secondary star image can move locally
+opposite that direct background flow; this is a qualitative lensing effect,
+not body-following sky motion. `uSkySeed` controls only sky layout/flow;
+`uSceneSeed` does not change this M6 scene's position, size, inclination,
+roll, or look.
 
-或者直接双击 `blackhole.scr` 预览效果。
+Below the truncated emissive inner edge, a non-emissive plunging-region
+occluder smoothly blocks background at disk-plane crossings. A matching smooth
+ray-space inner-flow silhouette blocks background-only rays that never cross
+the thin disk plane. Together they keep lensed stars out of the black gap
+between photon ring and visible disk without altering accumulated disk emission,
+the central shadow, or the one-pass architecture.
 
-## 从源码编译
+The disk remains a bounded procedural density model evaluated at traced
+plane intersections. It does not add a particle system, fluid simulation,
+texture, framebuffer, pass, or user setting.
 
-需要 MSVC（Visual Studio Build Tools）。`build.bat` 会自动定位已安装的 Visual Studio C++ 工具链，因此可从普通 `cmd.exe` 或资源管理器直接运行；也可在 Developer Command Prompt 中手动编译：
+The three `/c` settings are stored under
+`HKCU\Software\BlackHoleScreensaver`:
+
+- **Star brightness** — integer `0–100`, default `30`
+- **Disk opacity** — integer `0–100`, default `90`
+- **Doppler strength** — integer `0–100`, default `60`
+
+The persisted schema records `ConfigSchemaVersion = 1`. Existing installations
+without that marker remain compatible: valid legacy values are read, but the
+registry is not rewritten until you explicitly choose **OK**. Missing,
+malformed, wrong-type, or out-of-range values safely fall back to defaults;
+an unknown future schema version falls back to all defaults rather than being
+misinterpreted. Cancel and the title-bar close button never write settings.
+
+As with a normal Windows screensaver, keyboard input, mouse buttons, or a
+meaningful mouse movement exits `/s` and `/d`. Preview mode is hosted by the
+screen-saver control panel.
+
+## Requirements
+
+- Windows 10 or Windows 11
+- A GPU and driver exposing OpenGL 3.3 or later
+- One of the supported build toolchains when compiling from source:
+  - Visual Studio Build Tools / MSVC (preferred)
+  - MinGW-w64 GCC
+  - Zig (`zig cc`)
+- Windows PowerShell 5.1 or later for the deterministic shader-include generator
+- Git with the repository's full history only when running the historical M1–M3
+  contract verifiers; the current M6 verifier does not require Git history.
+
+## Build from source
+
+From a Developer Command Prompt, a normal `cmd.exe`, or Explorer, run:
 
 ```bat
-cl /O2 /W3 /nologo /D_CRT_SECURE_NO_WARNINGS /Fe:blackhole.scr ^
-    blackhole_screensaver.c opengl32.lib user32.lib gdi32.lib advapi32.lib shell32.lib comctl32.lib ^
-    /link /SUBSYSTEM:WINDOWS
+build.bat
 ```
 
-或者直接运行 `build.bat`；只有在编译真正成功时，它才会覆盖正式的 `blackhole.scr`。
+`build.bat` performs the following in order:
 
-## 工作原理
+1. Generates `generated\blackhole_screensaver_frag.inc` from the canonical
+   `blackhole_screensaver.glsl` source.
+2. Locates an available compiler.
+3. Builds to a unique temporary sibling file.
+4. Replaces `blackhole.scr` only after a successful compile and link.
 
-单个 C 文件把整个 GLSL fragment shader 作为字符串字面量内嵌。Win32 宿主创建全屏 OpenGL 3.3 上下文，编译着色器，每帧渲染一个全屏 quad。Vertex shader 用 `gl_VertexID` 生成 quad，不需要任何顶点缓冲。着色器在四个 `DiskLook` 外观之间平滑插值，并为中心和尺寸提供受边界约束的连续漂移；在盘面交点处独立合成物质密度、温度、Doppler 与束射。
+A generator or compiler failure leaves the existing `blackhole.scr` untouched.
+The script does **not** copy anything into `%SYSTEMROOT%\System32`.
 
-- **零依赖** — 只用 Win32 API + OpenGL
-- **单个 .scr 文件** — 不需要安装器、DLL、注册表条目（屏保设置管理的除外）
-- **配置对话框** — 三个滑块调节视觉效果，存储在 `HKCU\Software\BlackHoleScreensaver`
-- **直接开场** — `/s`、`/p` 和 `/d` 都从程序化近黑宇宙背景及四个漂移外观直接开始，不读取桌面像素
-- **节制的 GPU 负载** — 100 fps 为最大提交频率（10 ms timer）；OpenGL 同步栅栏确保 GPU 忙时丢帧而不是积压完整的光线追踪帧。慢帧完成后会有受限冷却时间，避免持续占满 GPU
-- **缓慢盘面运动** — 吸积盘的细丝与宏观密度共用较慢的时间轴，避免高速、屏幕锁定式旋转
+To validate that the checked-in generated include matches the canonical shader
+without compiling, run:
 
-## 系统要求
+```bat
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\generate-shader-include.ps1 -Check
+```
 
-- Windows 10 或 11
-- 支持 OpenGL 3.3 的显卡（2010 年后几乎所有显卡都支持）
+## Install and run
 
-## 许可证
+1. Build or download `blackhole.scr`.
+2. Copy it to a location recognized by the Windows screen-saver picker (for
+   example, `%SYSTEMROOT%\System32`) if you want to install it system-wide.
+3. Open **Settings → Personalization → Lock screen → Screen saver**.
+4. Select **Black Hole**, then use **Settings** to open `/c`.
 
-MIT License — 详见 [LICENSE](LICENSE)。
+For development, the normal modes are:
 
-吸积盘着色器改编自 [s0xDk/ghostty-blackhole](https://github.com/s0xDk/ghostty-blackhole)（同样 MIT License）。Windows 屏保宿主程序为原创。
+```text
+blackhole.scr /s        Full-screen screensaver
+blackhole.scr /p <HWND> Control-panel preview host
+blackhole.scr /c        Configuration dialog
+blackhole.scr /d        Full-screen debug path using the normal render lifecycle
+```
+
+## Shader workflow
+
+`blackhole_screensaver.glsl` is the only canonical fragment-shader source.
+`tools\generate-shader-include.ps1` converts it deterministically into the
+checked-in C string include at
+`generated\blackhole_screensaver_frag.inc`. `blackhole_screensaver.c` compiles
+that generated string into the `.scr`; it never loads GLSL at runtime.
+
+Do not edit the generated include by hand. Edit the canonical GLSL, regenerate
+the include, then build and validate the screensaver. The shader pipeline is
+kept explicit so the Windows host, its one-frame fence policy, and the fragment
+source can evolve without silently changing the shipped source of truth.
+
+The milestone contract verifiers are development and CI tools, not runtime
+requirements. The current `tools\verify-milestone-6.ps1` validates the
+host-owned static scene, M4 configuration boundary, generated shader include,
+M3 directional-sky isolation, and retained rendering constraints from a normal
+checkout. CI then runs `tools\verify-milestone-6-runtime.ps1` against the
+built `.scr`: a live `/d` process proves that the runner's OpenGL 3.3 driver
+compiled and linked the embedded fragment shader. Historical M1–M3 verifiers
+remain useful for their respective frozen milestones and require Git history
+containing their immutable baseline commit; the M4 verifier remains as the
+frozen pre-M6 configuration contract.
+
+## Project layout
+
+```text
+blackhole_screensaver.c                  Win32/OpenGL host and screen-saver modes
+blackhole_screensaver.glsl               Canonical fragment shader
+generated/blackhole_screensaver_frag.inc Generated C string include (do not edit)
+tools/generate-shader-include.ps1        Deterministic GLSL-to-C generator
+tools/verify-milestone-*.ps1             Static and runtime acceptance checks
+build.bat                                Safe local build entry point
+```
+
+## Scope and direction
+
+This release remains a single-pass, 48-step Schwarzschild-style screensaver.
+It deliberately does not ship real-time Kerr integration, an external texture
+or LUT dependency, multi-pass bloom, a particle system, a live fluid solver,
+or a binary-black-hole scene.
+
+Future visual work is evaluated against the same constraints: a directional
+world-sky whose motion is independent of the black-hole body, named and
+physically motivated motion, separate disk density/temperature/opacity
+controls, OpenGL 3.3 compatibility, and bounded GPU queue pressure.
+A future spinning-lens mode, if accepted, will be clearly labeled as an
+experimental approximation until it has a separately validated implementation.
+
+## License
+
+This repository is released under the [MIT License](LICENSE). See the license
+file for the complete notice, including the source attribution applicable to
+the initial accretion-disk shader adaptation.
+
+## References
+
+This section is an expandable record of source attribution and technical or
+visual research. A listing here does **not** mean that its code, shaders,
+textures, models, screenshots, generated data, or other assets are included in
+this project. Any future code or asset reuse must identify the exact upstream
+files and retain the required license notices.
+
+### Existing source attribution
+
+- [s0xDk/ghostty-blackhole](https://github.com/s0xDk/ghostty-blackhole) —
+  original black-hole shader starting point for the initial disk adaptation;
+  see the project [LICENSE](LICENSE) for the applicable MIT attribution.
+
+### Research and visual references
+
+- [Chaganti-Reddy/gargantua](https://github.com/Chaganti-Reddy/gargantua) —
+  MIT-licensed research reference for directional procedural star fields
+  sampled by escaped geodesics, gravitational lensing, relativistic disk
+  presentation, and future spinning-lens evaluation. Its Rust/wgpu, multi-pass
+  Kerr renderer is not a drop-in implementation for
+  this OpenGL 3.3, single-pass screensaver.
+- [denhanglim/GARGANTUA-SIMULATION](https://github.com/denhanglim/GARGANTUA-SIMULATION) —
+  reference for browser-based Schwarzschild ray marching and lensed-disk visual
+  studies. Its Three.js/WebGL and post-processing architecture is not imported
+  here.
+- [amirh0ss3in/Gargantua](https://github.com/amirh0ss3in/Gargantua) —
+  visual research reference for differential disk motion and clumpy,
+  volume-like accretion-disk structure. Its Taichi/Python fluid-simulation
+  approach is far beyond this renderer's single-pass, fixed-step budget and is
+  not included here.
+
+The next reference may be added to this list with its purpose, upstream URL,
+and verified reuse/license status.

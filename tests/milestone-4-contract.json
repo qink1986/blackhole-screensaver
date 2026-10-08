@@ -1,0 +1,81 @@
+{
+  "contract": "blackhole-screensaver-milestone-4",
+  "version": 1,
+  "scope": "validated-versioned-configuration-schema",
+  "canonicalShader": {
+    "path": "blackhole_screensaver.glsl",
+    "sourceSha256": "0D30FE161C212C0EA544CA7793159FC763DB47239486B93E9552C1473EC58876",
+    "generator": "tools/generate-shader-include.ps1",
+    "generatedInclude": "generated/blackhole_screensaver_frag.inc"
+  },
+  "configuration": {
+    "registryKey": "Software\\BlackHoleScreensaver",
+    "versionValue": "ConfigSchemaVersion",
+    "version": 1,
+    "minimum": 0,
+    "maximum": 100,
+    "legacyNoVersionPolicy": "read-compatible-no-write",
+    "invalidFieldPolicy": "default-that-field",
+    "unsupportedVersionPolicy": "default-all-fields",
+    "savePolicy": "explicit-ok-only",
+    "values": [
+      { "field": "starBrightness", "variable": "cfg_starBrightness", "registryValue": "StarBrightness", "default": 30, "sceneStateField": "starGain", "uniform": "uStarGain" },
+      { "field": "diskOpacity", "variable": "cfg_diskOpacity", "registryValue": "DiskOpacity", "default": 90, "sceneStateField": "diskOpacity", "uniform": "uDiskOpacity" },
+      { "field": "doppler", "variable": "cfg_doppler", "registryValue": "Doppler", "default": 60, "sceneStateField": "doppler", "uniform": "uDoppler" }
+    ]
+  },
+  "host": {
+    "path": "blackhole_screensaver.c",
+    "schemaAnchors": [
+      "#define REG_VALUE_CONFIG_SCHEMA_VERSION \"ConfigSchemaVersion\"",
+      "#define CONFIG_SCHEMA_VERSION 1u",
+      "#define CONFIG_VALUE_MIN 0",
+      "#define CONFIG_VALUE_MAX 100"
+    ],
+    "requiredFunctions": [
+      "makeDefaultConfig",
+      "configValueIsValid",
+      "readRegistryDword",
+      "readValidatedConfigValue",
+      "loadConfig",
+      "saveConfig"
+    ],
+    "requiredAnchors": [
+      "if (schemaStatus == CONFIG_REGISTRY_VALUE_MISSING)",
+      "else if (schemaStatus == CONFIG_REGISTRY_VALUE_VALID && schemaVersion == CONFIG_SCHEMA_VERSION)",
+      "if (type != REG_DWORD || bytes != sizeof(DWORD))",
+      "if (value > (DWORD)CONFIG_VALUE_MAX) return fallback;",
+      "if (!saveConfig(&pending))",
+      "MessageBoxA(hwnd, \"Settings could not be saved.\"",
+      "writeRegistryDword(key, REG_VALUE_CONFIG_SCHEMA_VERSION, CONFIG_SCHEMA_VERSION)"
+    ],
+    "sceneStateAnchors": [
+      "state.starGain = (float)cfg_starBrightness / 100.0f;",
+      "state.diskOpacity = (float)cfg_diskOpacity / 100.0f;",
+      "state.doppler = (float)cfg_doppler / 100.0f;"
+    ],
+    "uniformUploadAnchors": [
+      "if (uStarGain >= 0)    glUniform1f(uStarGain, state->starGain);",
+      "if (uDiskOpacity >= 0) glUniform1f(uDiskOpacity, state->diskOpacity);",
+      "if (uDoppler >= 0)     glUniform1f(uDoppler, state->doppler);"
+    ],
+    "renderAnchors": [
+      "glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);",
+      "if (!previousFrameComplete(now)) return;",
+      "if (now < g_nextFrameEligibleTick) return;"
+    ],
+    "forbiddenTokens": [
+      "glTex",
+      "sampler2D",
+      "DesktopSnapshot",
+      "captureDesktop",
+      "BitBlt"
+    ]
+  },
+  "build": {
+    "script": "build.bat",
+    "generatorInvocation": "tools\\generate-shader-include.ps1",
+    "temporaryOutputVariable": "BUILD_TMP",
+    "promotion": "move /y \"%BUILD_TMP%\" blackhole.scr"
+  }
+}

@@ -1,0 +1,89 @@
+Milestone 6 acceptance: static scene
+
+Purpose
+-------
+M6 replaces the legacy presentation tour with one explicitly named,
+host-owned STATIC_SCHWARZSCHILD scene. The body layout and disk look do not
+tour, breathe, drift, or reset.
+
+Fixed approved scene
+--------------------
+- center: (0.50, 0.50)
+- apparent radius: 0.120
+- temperature: 5500 K
+- inclination: 1.50 rad
+- roll: 0.35 rad
+- disk radii: 1.80 to 8.00
+- baseline opacity / Doppler: 0.90 / 0.60
+- beam / gain / contrast / wind / material speed / exposure:
+  2.50 / 2.20 / 1.60 / 7.00 / 5.00 / 1.40
+
+Preserved behavior
+------------------
+- OpenGL 3.3, one fullscreen draw, fixed N_STEPS 48, and one-frame GPU-fence
+  scheduling. Slow frames receive only a bounded one-quarter cooldown after
+  retirement, so the safety policy does not double visible sky-motion gaps.
+- M3 directional sky and local source-plane lensing remain unchanged. Every
+  deflected star path may gather adjacent procedural catalogue cells only when
+  its source coordinate is near a catalogue-cell edge; direct-sky stars keep
+  their original one-cell point-sprite path. This bounded seam treatment
+  prevents an entry/exit flash without deliberately blurring or dimming a star.
+  Only non-captured, truly near-tangential exits use a bounded source-plane
+  projection and smoothly return to direct sky; stable escaping rays retain
+  their full lens deflection instead of switching at a binary exit gate.
+- M4 versioned /c configuration behavior and its star brightness, disk
+  opacity, and Doppler mapping remain unchanged.
+- uSkySeed remains a sky-layout and sky-flow seed. uSceneSeed does not affect
+  position, size, inclination, roll, or look in M6.
+- M6 requires visible relative motion: the black-hole composition is fixed
+  while the directional background sky translates at `SKY_FLOW_SPEED = 0.0750`
+  (50% faster than the prior M6 calibration). `uSkySeed` selects one random
+  direction once per screensaver launch; that direction remains straight and
+  fixed during the run. It must not rotate around the black-hole or screen
+  center. Within the strong-lensing ring, a parity-
+  reversed secondary image may move locally opposite the direct background;
+  that qualitative lens behavior is allowed, but one-frame flashes and
+  discontinuous teleports are not. A frame in which both the body composition
+  and the background remain fixed is not an acceptable M6 result.
+
+Disk material
+-------------
+- The disk retains its existing procedural density model. M6 does not add a
+  new disk-material lifecycle, quality tier, texture, particle system, fluid
+  simulation, framebuffer, pass, or user setting.
+- The dark region below the truncated emissive inner edge is a non-emissive,
+  smoothly opaque plunging region at a disk-plane crossing. A separate smooth
+  ray-space inner-flow silhouette blocks background-only rays that never cross
+  the thin disk plane. Together they keep stars out of the black gap between
+  the photon ring and visible disk without reducing accumulated disk emission;
+  the event-horizon shadow remains separate.
+- The existing derivative-free footprint estimate suppresses unresolved disk
+  detail at the critical lens ring. This remains procedural disk material, not
+  a particle system, fluid simulation, texture, asset, FBO, or added pass.
+
+Explicitly deferred
+-------------------
+- M5 quality tiers and startup GPU calibration.
+- Kerr LUT validation/integration and binary black-hole work.
+
+Manual final M6 gate
+--------------------
+1. Run blackhole.scr /s and observe the fixed composition and sky motion.
+2. Confirm the black-hole center, apparent radius, disk inclination, roll, and
+   overall disk look remain fixed, while direct-sky stars or clusters translate
+   past that fixed body without orbiting it. On a subsequent launch, verify a
+   random direction once per screensaver launch is selected; within each run
+   the sky trajectory remains straight. Near the lens ring, a smooth
+   locally reversed secondary image is allowed; stars retain their original
+   apparent size and must not disappear at a procedural cell edge, show an
+   entry/exit flash at the lens boundary, flash for one frame, abruptly turn
+   black at a near-tangential exit, teleport, visibly pass through the black
+   inner disk circle, or move normally in the black gap between photon ring and
+   visible disk.
+3. Confirm the disk stays attached to the fixed body, has no screen-space
+   overlay artifacts, and retains the black inner cavity and photon-ring-to-disk
+   gap without background stars leaking through.
+4. Run blackhole.scr /p in a Screen Saver Settings preview and confirm the
+   same stable composition is used.
+5. Reply "M6 through" if acceptable, or report the visible motion and time at
+   which it occurs.

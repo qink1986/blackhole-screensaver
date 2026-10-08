@@ -1,0 +1,82 @@
+{
+  "contract": "blackhole-screensaver-milestone-1",
+  "version": 1,
+  "scope": "frozen-no-visual-change-foundation",
+  "runtimeBaseline": {
+    "algorithm": "SHA256",
+    "lineEndingNormalization": "lf",
+    "hostSourceSha256": "F21DF2B32039CE84651094901CED51FFAF00B8AC25D7293DF1D923180FCA98CC",
+    "updateRule": "Any intentional host-source change must be reviewed, accompanied by its relevant acceptance evidence, and update this baseline deliberately."
+  },
+  "sourceOfTruth": {
+    "hostFile": "blackhole_screensaver.c",
+    "embeddedShaderSymbol": "shaderSource",
+    "fragmentHeaderSymbol": "fragHeader",
+    "referenceShader": "blackhole_screensaver.glsl",
+    "referenceRole": "legacy-reference-only",
+    "requiredSourceAnchors": [
+      "g_sceneSeed = makeSceneSeed();"
+    ]
+  },
+  "shader": {
+    "glslVersion": "330",
+    "uniforms": [
+      { "name": "iTime", "declaration": "uniform float iTime;", "hostLocation": "uTime" },
+      { "name": "iResolution", "declaration": "uniform vec2  iResolution;", "hostLocation": "uResolution" },
+      { "name": "uStarGain", "declaration": "uniform float uStarGain;", "hostLocation": "uStarGain" },
+      { "name": "uDiskOpacity", "declaration": "uniform float uDiskOpacity;", "hostLocation": "uDiskOpacity" },
+      { "name": "uDoppler", "declaration": "uniform float uDoppler;", "hostLocation": "uDoppler" },
+      { "name": "uSceneSeed", "declaration": "uniform float uSceneSeed;", "hostLocation": "uSceneSeed" }
+    ],
+    "requiredSourceAnchors": [
+      "#define N_STEPS 48",
+      "#define DEMO_N 4",
+      "const float DEMO_HOLD_SEC  = 18.0000;",
+      "const float DEMO_FADE_SEC  = 6.0000;",
+      "const float DEMO_SEC       = 96.0000;",
+      "const float DEMO_SIZE_SEC  = 128.0000;"
+    ],
+    "forbiddenTokens": [
+      "fwidth",
+      "dFdx",
+      "dFdy",
+      "DesktopSnapshot",
+      "captureDesktop",
+      "uploadDesktop",
+      "uDesktop",
+      "uOpening",
+      "BitBlt",
+      "CAPTUREBLT"
+    ]
+  },
+  "configuration": {
+    "registryKeySourceAnchor": "#define REG_KEY \"Software\\\\BlackHoleScreensaver\"",
+    "uiMinimum": 0,
+    "uiMaximum": 100,
+    "values": [
+      { "variable": "cfg_starBrightness", "registryValue": "StarBrightness", "default": 30, "uniform": "uStarGain", "sceneStateField": "starGain" },
+      { "variable": "cfg_diskOpacity", "registryValue": "DiskOpacity", "default": 90, "uniform": "uDiskOpacity", "sceneStateField": "diskOpacity" },
+      { "variable": "cfg_doppler", "registryValue": "Doppler", "default": 60, "uniform": "uDoppler", "sceneStateField": "doppler" }
+    ]
+  },
+  "scheduling": {
+    "frameIntervalMs": 10,
+    "cooldownMaxMs": 3000,
+    "requiredSourceAnchors": [
+      "static GLsync g_frameFence;",
+      "if (!g_frameFence) return 1;",
+      "g_frameFence = fence;",
+      "SetTimer(hwnd, 1, FRAME_INTERVAL_MS, NULL);",
+      "int initialFramePresented = renderFrame(1);",
+      "resetFrameSchedule(GetTickCount64());"
+    ]
+  },
+  "modes": {
+    "requiredSourceAnchors": [
+      "_strnicmp(cl, \"/s\", 2)",
+      "_strnicmp(cl, \"/p\", 2)",
+      "_strnicmp(cl, \"/c\", 2)",
+      "_strnicmp(cl, \"/d\", 2)"
+    ]
+  }
+}

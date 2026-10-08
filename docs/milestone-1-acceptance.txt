@@ -1,0 +1,176 @@
+Black Hole Screensaver — Milestone 1 Contract and Acceptance
+===============================================================
+
+Status: frozen foundation; no intentional rendering or product-behavior change.
+
+This file is intentionally plain text. The repository ignores newly created
+Markdown files by policy, while this contract must remain tracked and reviewable.
+
+1. Scope
+--------
+
+Milestone 1 records the contracts and structural acceptance checks that later
+milestones must satisfy. It does not move scene ownership, change the shader,
+change configuration semantics, add a quality tier, add textures, add Kerr,
+or add Binary rendering.
+
+The expected visible result for valid existing configuration is the current
+Schwarzschild-style screensaver behavior. The verifier freezes a canonical
+SHA-256 hash of the authoritative host source (normalizing CRLF/LF line endings
+so a Git checkout convention does not affect the result), so this no-change
+milestone rejects any runtime-source edit. A later intentional host-source change must update that
+baseline deliberately, with the relevant review and acceptance evidence. The
+supplemental structural checks are not pixel hashes: the current renderer is
+seeded and time-dependent, and the repository has no deterministic headless
+OpenGL capture environment.
+
+2. Runtime source of truth
+--------------------------
+
+- The shipped fragment shader is shaderSource embedded in
+  blackhole_screensaver.c, prefixed at runtime by fragHeader.
+- blackhole_screensaver.glsl is a legacy reference only. Editing it alone does
+  not change blackhole.scr.
+- A later canonical-shader milestone may replace this arrangement with a
+  generated include, but the build must then prove equivalence explicitly.
+
+3. Compatibility baseline
+-------------------------
+
+The current safe baseline remains a one-pass, OpenGL 3.3-compatible,
+Schwarzschild-style renderer with:
+
+- N_STEPS = 48;
+- a 10 ms presentation-attempt timer cap;
+- at most one outstanding GPU frame, enforced by a fence or a synchronous
+  fallback;
+- bounded post-completion cooldown for slow frames;
+- a hidden first render/present before a fullscreen window is shown;
+- no desktop capture, desktop upload, desktop texture sampling, or opening
+  transition path;
+- no fwidth, dFdx, or dFdy in the production shader.
+
+/s, /p, /d, and /c retain their existing Windows screensaver meanings.
+The existing registry key and three persisted controls remain compatible:
+
+  HKCU\Software\BlackHoleScreensaver
+  StarBrightness = 30 by default, UI range 0..100
+  DiskOpacity    = 90 by default, UI range 0..100
+  Doppler        = 60 by default, UI range 0..100
+
+Milestone 4 will define a versioned and validated configuration schema. Until
+then, this compatibility list is the baseline to preserve.
+
+4. Frozen future contracts
+--------------------------
+
+These are approved design constraints for future milestones. They are not
+claims about the current renderer until their implementation milestone passes.
+
+4.1 Scene state and coordinates
+
+- The C host will become the canonical owner of an immutable-per-frame
+  SceneState. The shader will consume validated uniforms and render them.
+- A run has independent immutable sceneSeed and skySeed values.
+- Sky sources are inertial world-direction sources. With a fixed camera, a
+  direct-sky feature must not move when a black hole moves; only its local
+  lensing footprint may change the apparent source position.
+- Scene selection, camera/body pose, sky coordinate transforms, and ray
+  tracing are separate concerns.
+
+4.2 Motion and physical terminology
+
+- A safe single-hole scene is static by default.
+- A declared body proper-motion scene may use constant signed screen angular
+  velocity against a fixed sky. It is cinematic angular motion, not km/s.
+- A declared camera push/pull may be monotonic within a scene; periodic size
+  breathing is not allowed in the future physical-motion catalog.
+- A disk/spin axis is fixed by default. A future experimental tilted-disk
+  precession scene may use a fixed spin axis, fixed tilt, and constant signed
+  precession rate. Arbitrary wobble, sinusoidal reversal, and look-to-look
+  axis interpolation are not physical substitutes.
+- Future disk material evolution is analytic and disk-space based: independent
+  local birth, shear, monotonic differential phase, slow radial inflow, and
+  dissipation. It is not a fluid or GRMHD simulation.
+
+4.3 Experimental rendering
+
+- The current path must remain labelled Schwarzschild-style, not Kerr.
+- Before validation, an experimental spinning visual is labelled
+  "Experimental spinning-lens approximation".
+- A formally named Kerr scene requires a versioned, offline double-precision
+  transfer LUT embedded in the single .scr, reference/invariant validation,
+  and target-hardware acceptance. The first planned formal preset is a*=0.7,
+  inclination 60 degrees, a fixed camera/FOV, and a prograde thin equatorial
+  disk with its documented inner-edge convention.
+- No physical Mass control is allowed until a mass, distance, FOV, time, and
+  disk-unit contract exists. Use apparent size or lens scale instead.
+- Binary scenes are deferred to the next version. This version adds no Binary
+  rendering, controls, resources, quality qualification, merger claim, or
+  numerical-relativity claim.
+
+4.4 Quality and fallback
+
+- A compiled-in safe Schwarzschild baseline must be reachable without a user
+  repairing registry values.
+- Later quality calibration occurs only after the safe first frame, only for
+  /s and /d, and only once per run. /p and /c do not calibrate.
+- Calibration uses bounded host-observed fence completion behavior; it is not
+  a GPU timer or a guaranteed FPS measurement.
+- It can only decide experimental-scene eligibility and optional visual detail.
+  It must not silently change the declared physical model during a run.
+- Any configuration, capability, shader, LUT, or calibration failure falls
+  back to the safe Schwarzschild baseline.
+
+5. Milestone sequence and visual checkpoints
+---------------------------------------------
+
+1. Contract and acceptance foundation (this milestone): no visual change.
+2. Host SceneState seam with current Schwarzschild parity: no intended visual
+   change; report verification before moving on.
+3. Canonical shader pipeline and complete inertial sky: visual change.
+   STOP for user visual confirmation.
+4. Validated configuration schema: UI/behavior change. STOP for user
+   confirmation after verification.
+5. Discrete quality tiers and bounded startup calibration: behavior/performance
+   change. STOP for user confirmation after verification.
+6. Physical scene motion and disk material evolution: visual change.
+   STOP for user visual confirmation.
+7. Offline Kerr LUT generator and validation: no default visual change until
+   the experimental preset is explicitly enabled; report evidence and wait.
+8. Kerr integration and final visual acceptance: visual change. STOP for user
+   visual confirmation before release-readiness work.
+
+The existing tag-triggered GitHub release automation predates this contract and
+is unchanged by Milestone 1. It is not evidence that the future Kerr
+release-readiness gate has passed.
+
+No later milestone is authorized merely because an earlier milestone compiled.
+For every milestone that affects visuals, the user must explicitly confirm the
+observed result before the next visual milestone begins.
+
+6. Acceptance for Milestone 1
+-----------------------------
+
+Automated:
+
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\verify-milestone-1.ps1
+
+The check reads tests/milestone-1-contract.json, first verifies the frozen
+line-ending-normalized SHA-256 of the authoritative host source, then checks the current runtime
+source, uniform mapping, configuration, mode, scheduling, and key control-flow
+anchors. It does not prove pixel identity or physical accuracy.
+
+Manual Windows/OpenGL smoke acceptance:
+
+1. Build with build.bat.
+2. Run /d and confirm a live initialized first frame rather than a black flash.
+3. Run /s and /p with a valid preview parent; confirm they stay live long enough
+   to render and exit normally when terminated by the normal test harness.
+4. Open /c; record the three current controls, save boundary values 0 and 100,
+   reopen, and confirm persistence.
+5. Confirm %TEMP%\blackhole_screensaver.log contains no shader compile/link
+   failure after the smoke run.
+6. Run git diff --check.
+
+A failure in the automated or manual check blocks the next milestone.

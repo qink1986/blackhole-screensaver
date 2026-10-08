@@ -1,0 +1,192 @@
+Black Hole Screensaver - Milestone 3 Canonical Shader and Directional Sky
+=========================================================================
+
+Status: implementation and automated verification in progress; this is a
+visual-change milestone. Do not begin a later visual milestone until a person
+has completed the manual acceptance steps below and explicitly approved the
+observed image.
+
+This file is plain text because the repository ignores newly created Markdown
+files.
+
+1. Purpose
+----------
+
+Milestone 3 has two coupled goals:
+
+1. Establish blackhole_screensaver.glsl as the only canonical fragment-shader
+   source and generate the C string compiled by blackhole_screensaver.c from it.
+2. Make the procedural sky directional with respect to the camera/world frame:
+   its optional shared world-space drift is independent of the black-hole body,
+   while only escaping rays in the local strong-lensing region sample a
+   deflected direction of that same sky.
+
+The generated include is compiled into the single .scr. The running screensaver
+never reads a GLSL file, texture, desktop image, or other external asset.
+
+2. Canonical-source contract
+----------------------------
+
+Canonical source:
+
+  blackhole_screensaver.glsl
+
+Generated, checked-in C string include:
+
+  generated\blackhole_screensaver_frag.inc
+
+Generator:
+
+  tools\generate-shader-include.ps1
+
+The generator requires canonical GLSL to be UTF-8 without BOM, ASCII, LF-only,
+NUL-free, and to begin with:
+
+  #version 330
+
+It escapes every GLSL line into one C string literal, writes a temporary sibling
+file, and promotes it with a same-directory replacement. -Check fails if the
+checked-in include is missing or stale.
+
+blackhole_screensaver.c includes the generated C string as shaderSource. It no
+longer concatenates a separate fragment header or reads standalone GLSL at
+runtime. build.bat regenerates the include before selecting a compiler and
+promotes a temporary .scr only after a successful build.
+
+3. Directional-sky contract
+---------------------------
+
+The fragment shader owns three named directional seams:
+
+  viewWorldDirection(uv, aspect)
+      Direct camera/world direction for this screen pixel.
+
+  lensedWorldDirection(viewWorldDir, localImageTangent, localExitPoint,
+                        localExitDir, roll, lensScale)
+      Projects an escaping local traced ray to a fixed source plane, undoes
+      the local lens roll/scale, and returns the corresponding camera/world
+      direction. With no deflection, the projected source coordinate equals
+      the local image coordinate and the result is viewWorldDir.
+
+  skyRadiance(worldDir, starGain)
+      The only source of procedural sky radiance. It combines a near-black
+      background field, layered sparse stars, and compact clusters.
+
+  skyCoordinates(worldDir)
+      The shared directional coordinate mapping for all sky layers. It owns a
+      deliberately slow world-space drift and twist, seeded by uSkySeed and
+      timed by iTime. It never reads the black-hole center, disk roll, size, or
+      uSceneSeed.
+
+The direct path samples:
+
+  skyRadiance(viewWorldDir, skyGain)
+
+For an escaping ray, the renderer first builds:
+
+  sampledWorldDir = normalize(mix(viewWorldDir, lensedWorldDir, lensBlend))
+  skyRadiance(sampledWorldDir, skyGain)
+
+It remaps the **sampled direction** continuously rather than crossfading an
+unlensed star image with a lensed one. Consequently, a moving source has one
+local lens image whose apparent speed and shear vary with the source-map
+Jacobian; it is not visually glued to an unwarped duplicate by a body-local
+colour fade.
+
+uSkySeed controls the sky catalogue's per-run layout, colours, and flow phase.
+uSceneSeed remains responsible for the legacy DiskLook sequence and related
+scene-derived behavior; it does not control the sky catalogue. The equal sky
+radiance gain on both paths prevents a body-local blend boundary from making a
+star appear to move solely by fading or brightening.
+
+The direct sky functions must not depend on screen-object center, DiskLook
+roll, or uSceneSeed. The black hole may cross the display, but distant,
+unlensed stars move only through their common world-sky flow, never with body
+center, roll, or size. The local lens footprint may alter only the sampled world
+direction of an escaping ray through its source-plane projection; it must not
+translate a black-hole-local sky patch.
+
+4. Preserved runtime boundaries
+-------------------------------
+
+- OpenGL 3.3 compatibility remains required.
+- There is still one full-screen glDrawArrays(GL_TRIANGLE_STRIP, 0, 4) pass.
+- N_STEPS remains 48.
+- No FBO, texture/sampler, desktop capture, upload, image readback, external
+  runtime shader source, particle system, or post-processing chain is added.
+- The derivative-free disk filtering policy remains: fwidth, dFdx, and dFdy
+  are not permitted in the canonical GLSL.
+- Existing raw registry-value conversion remains owned by the shader clamps;
+  Milestone 3 does not validate or migrate registry data.
+- The hidden first frame, one-frame OpenGL fence, busy-frame skip, cooldown,
+  /s, /p, /d, and /c lifecycles remain host behavior.
+
+5. What Milestone 3 does not claim
+----------------------------------
+
+This is not an exact Kerr geodesic solver, a physical simulation of galaxy
+motion, or a fluid/GRMHD disk simulation. It does not yet replace the legacy
+Lissajous body drift, periodic apparent-size motion, or DiskLook interpolation
+with the later named physical-motion contract. It also does not add a spinning
+lens, a Kerr LUT, multi-pass bloom, a texture sky, or a binary system.
+
+The directional sky is a procedural visual source, not an astronomical
+catalogue. Its current shared drift is an artistic world-direction field, not a
+physical galaxy simulation. It is never screen-locked scrolling or a background
+that follows the black-hole body.
+
+6. Automated acceptance
+-----------------------
+
+From the project root:
+
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\generate-shader-include.ps1 -Check
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\verify-milestone-3.ps1
+  build.bat
+
+The Milestone 3 verifier independently:
+
+- reads the immutable pre-M2 host source from commit
+  166ab817f1052436b89ae4b7c5f61718452e9b25;
+- verifies its reviewed host and shader C-block hashes;
+- reconstructs the reviewed M2 SceneState seam and the narrowly allowed M3
+  host migration, then compares the current host source exactly;
+- decodes the generated C literals and compares their bytes exactly with the
+  canonical GLSL source;
+- calls the generator in -Check mode;
+- verifies the canonical uniform declarations, the 48-step/four-look baseline,
+  forbidden desktop/texture/derivative paths, the direct and lensed sky calls,
+  the local-direction identity invariant, and the one-pass host draw path; and
+- checks that build.bat regenerates before compiling and uses a temporary output
+  before promotion.
+
+GitHub Actions fetches full history because this comparison needs the immutable
+pre-M2 commit.
+
+7. Manual visual acceptance (required stop gate)
+------------------------------------------------
+
+Use the intended target display and driver. At a minimum:
+
+1. Run /d and /s at the normal default settings. Confirm a rendered first frame
+   rather than a black flash, shader error dialog, or %TEMP% shader log.
+2. Observe the black hole through several seconds of its current bounded drift
+   and across a DiskLook transition. Stars well outside the strong lens region
+   may participate in the slow common sky flow, but must never follow center,
+   roll, or size.
+3. Watch the strong lens region. It may displace, magnify, split, or obscure
+   stars and clusters locally. A source crossing it must speed up, slow down,
+   stretch, or change image branch according to the local lens map, not retain
+   a visibly glued unwarped copy or reverse only because of a colour fade.
+4. Confirm the layered star field and compact clusters remain visible without
+   overwhelming the disk at the default star-brightness setting.
+5. Check the disk's inner bright ring and filaments for a regression in moire,
+   discontinuities, flicker, or loss of the existing broad clumps/gaps.
+6. Test /p with a valid preview host, /c open/close without an unintended write,
+   and /d or /s exit through normal keyboard/mouse behavior.
+7. Repeat a representative test on the intended Intel integrated GPU and, when
+   available, an AMD and NVIDIA driver, plus high-DPI and ultra-wide displays.
+
+Record any observation that contradicts the direct-sky or local-lensing rule.
+Do not continue automatically to registry, quality, motion, or spinning-lens
+milestones until this visual acceptance is explicitly confirmed.

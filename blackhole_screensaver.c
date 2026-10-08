@@ -64,303 +64,99 @@ static HCURSOR g_savedCursor;
 // Slow frames get an additional bounded rest after their fence retires. The
 // elapsed time is host submit-to-observation time, not a hardware GPU query.
 #define FRAME_COOLDOWN_TRIGGER_MS (2ULL * FRAME_INTERVAL_MS)
+#define FRAME_COOLDOWN_DIVISOR 4ULL
 #define FRAME_COOLDOWN_MAX_MS 3000ULL
+
+typedef struct StaticSchwarzschildScene {
+    GLfloat centerX;
+    GLfloat centerY;
+    GLfloat apparentRadius;
+    GLfloat temperature;
+    GLfloat inclination;
+    GLfloat roll;
+    GLfloat innerRadius;
+    GLfloat outerRadius;
+    GLfloat baselineOpacity;
+    GLfloat baselineDoppler;
+    GLfloat beam;
+    GLfloat gain;
+    GLfloat contrast;
+    GLfloat wind;
+    GLfloat materialSpeed;
+    GLfloat exposure;
+} StaticSchwarzschildScene;
+
+// M6 owns one named, fixed Schwarzschild-style composition. Future named
+// scenes must be added deliberately rather than reviving time-driven presets.
+static const StaticSchwarzschildScene STATIC_SCHWARZSCHILD = {
+    0.50f, 0.50f, 0.120f,
+    5500.0f, 1.50f, 0.35f, 1.80f, 8.00f,
+    0.90f, 0.60f, 2.50f, 2.20f, 1.60f, 7.00f, 5.00f, 1.40f
+};
+
+typedef struct SceneState {
+    // Immutable snapshot passed from the host to one rendered frame. M6 owns
+    // the complete static scene layout and look before GLSL builds local rays.
+    GLfloat elapsedSeconds;
+    GLfloat resolutionX;
+    GLfloat resolutionY;
+    GLfloat starGain;
+    GLfloat diskOpacity;
+    GLfloat doppler;
+    GLfloat sceneSeed;
+    GLfloat skySeed;
+    StaticSchwarzschildScene scene;
+} SceneState;
 
 static GLsync g_frameFence;
 static ULONGLONG g_frameSubmitTick;
 static ULONGLONG g_nextFrameEligibleTick;
 static int g_frameSyncReady;
 static GLfloat g_sceneSeed;
+static GLfloat g_skySeed;
+// Set only for the automated M6 OpenGL smoke. Production runs ignore this
+// entirely unless the test process explicitly supplies a named event.
+static HANDLE g_shaderSmokeEvent;
 
 // ============================================================ config ==
-// Config stored in registry under HKCU\Software\BlackHoleScreensaver
+// Config stored in registry under HKCU\Software\BlackHoleScreensaver.
+// M4 accepts legacy unversioned values but writes only the validated v1 schema.
 #define REG_KEY "Software\\BlackHoleScreensaver"
-static int   cfg_starBrightness = 30;   // STAR_GAIN * 100
-static int   cfg_diskOpacity    = 90;   // DISK_OPACITY * 100
-static int   cfg_doppler        = 60;   // DOPPLER_MIX * 100
+#define REG_VALUE_CONFIG_SCHEMA_VERSION "ConfigSchemaVersion"
+#define CONFIG_SCHEMA_VERSION 1u
+#define CONFIG_VALUE_MIN 0
+#define CONFIG_VALUE_MAX 100
+#define CONFIG_DEFAULT_STAR_BRIGHTNESS 30
+#define CONFIG_DEFAULT_DISK_OPACITY 90
+#define CONFIG_DEFAULT_DOPPLER 60
+
+typedef struct ConfigValues {
+    int starBrightness;
+    int diskOpacity;
+    int doppler;
+} ConfigValues;
+
+typedef enum ConfigRegistryValueStatus {
+    CONFIG_REGISTRY_VALUE_MISSING,
+    CONFIG_REGISTRY_VALUE_VALID,
+    CONFIG_REGISTRY_VALUE_INVALID
+} ConfigRegistryValueStatus;
+
+static int cfg_starBrightness = CONFIG_DEFAULT_STAR_BRIGHTNESS;
+static int cfg_diskOpacity = CONFIG_DEFAULT_DISK_OPACITY;
+static int cfg_doppler = CONFIG_DEFAULT_DOPPLER;
 
 // ============================================================ shader source ==
-// The GLSL source is embedded as a string. The shader declares:
-//   uniform float iTime;
-//   uniform vec2  iResolution;
-// We provide these from the host. The shader's mainImage() is called
-// for every fragment.
+// Canonical GLSL is generated into a C string include at build time. The
+// resulting source is compiled from this translation unit, so the runtime
+// remains a single self-contained .scr with no shader file reads.
 
-static const char* shaderSource =
-"// --- tunables (screensaver-adapted) ---\n"
-"const float HOLE_RADIUS   = 0.0200;\n"
-"const float LENS_DEPTH    = 13.0000;\n"
-"const float DISK_INNER    = 1.8000;\n"
-"const float DISK_OUTER    = 8.0000;\n"
-"const float DISK_INCL     = 1.5000;\n"
-"const float DISK_ROLL     = 0.3500;\n"
-"const float DISK_GAIN     = 2.2000;\n"
-"const float DISK_TEMP     = 5500.0000;\n"
-"const float DISK_BEAM     = 2.5000;\n"
-"const float DISK_WIND     = 7.0000;\n"
-"const float DISK_CONTRAST = 1.6000;\n"
-"const float EXPOSURE      = 1.4000;\n"
-"const float DRIFT_SPEED   = 0.2500;\n"
-"const float WORK_AREA     = 0.0;\n"
-"const float DISK_LOD_CRITICAL_GAIN = 150.0000;\n"
-"#define N_STEPS 48\n"
-"#define B_CRIT 2.5980762\n"
-"\n"
-"const float MACRO_CYCLE_SEC      = 36.0000;\n"
-"const float MACRO_FADE_SEC       = 3.0000;\n"
-"\n"
-"const float DEMO_SEC       = 96.0000;\n"
-"const float DEMO_HOLD_SEC  = 18.0000;\n"
-"const float DEMO_FADE_SEC  = 6.0000;\n"
-"const float DEMO_SIZE_SEC  = 128.0000;\n"
-"\n"
-"// Hash shared by the launch-seeded scene deck and procedural background.\n"
-"float hash21(vec2 p){p=fract(p*vec2(234.34,435.345));p+=dot(p,p+34.23);return fract(p.x*p.y);}\n"
-"\n"
-"struct DiskLook { float temp,incl,roll,inner,outer,opac,dopp,beam,gain,contr,wind,speed,expo,star; };\n"
-"#define DEMO_N 4\n"
-"// Four legacy looks, now driven by a bounded continuous drift rather than fixed framing.\n"
-"const DiskLook DEMO_TOUR[DEMO_N] = DiskLook[DEMO_N](\n"
-"  DiskLook(5500.,1.50,0.35,1.8,8.0,0.90,0.60,2.5,2.2,1.6,7.0,5.0,1.40,0.3),\n"
-"  DiskLook(4500.,1.52,0.10,2.2,7.0,0.85,0.35,2.0,1.4,0.5,7.0,5.0,1.20,0.3),\n"
-"  DiskLook(3800.,0.55,-0.30,2.2,6.0,0.45,0.90,3.5,1.6,0.4,3.0,2.5,1.10,0.3),\n"
-"  DiskLook(6500.,0.30,0.00,3.0,10.0,0.50,0.80,2.5,1.0,1.1,7.0,5.0,1.00,0.3));\n"
-"\n"
-"DiskLook mixLook(DiskLook a,DiskLook b,float f){\n"
-"  return DiskLook(mix(a.temp,b.temp,f),mix(a.incl,b.incl,f),mix(a.roll,b.roll,f),\n"
-"    mix(a.inner,b.inner,f),mix(a.outer,b.outer,f),mix(a.opac,b.opac,f),\n"
-"    mix(a.dopp,b.dopp,f),mix(a.beam,b.beam,f),mix(a.gain,b.gain,f),\n"
-"    mix(a.contr,b.contr,f),mix(a.wind,b.wind,f),mix(a.speed,b.speed,f),\n"
-"    mix(a.expo,b.expo,f),mix(a.star,b.star,f));\n"
-"}\n"
-"// Each 96-second block visits all four looks once. The seeded anchor advances\n"
-"// between blocks, so the boundary cannot repeat; the other order choices vary.\n"
-"int sceneAt(int segmentIndex){\n"
-"  int block=segmentIndex/DEMO_N,slot=segmentIndex-block*DEMO_N;\n"
-"  int anchor=(int(floor(uSceneSeed*float(DEMO_N)))+block)%DEMO_N;\n"
-"  int nextAnchor=(anchor+1)%DEMO_N;\n"
-"  bool chooseEndA=hash21(vec2(float(block)+uSceneSeed*17.0,19.0))<0.5;\n"
-"  int endA=(anchor+2)%DEMO_N,endB=(anchor+3)%DEMO_N;\n"
-"  int end=chooseEndA?endA:endB,other=chooseEndA?endB:endA;\n"
-"  bool nextAnchorFirst=hash21(vec2(float(block)+uSceneSeed*31.0,53.0))<0.5;\n"
-"  if(slot==0)return anchor;\n"
-"  if(slot==1)return nextAnchorFirst?nextAnchor:other;\n"
-"  if(slot==2)return nextAnchorFirst?other:nextAnchor;\n"
-"  return end;\n"
-"}\n"
-"DiskLook demoLook(){\n"
-"  float segment=DEMO_HOLD_SEC+DEMO_FADE_SEC;\n"
-"  int segmentIndex=int(floor(iTime/segment));\n"
-"  float local=fract(iTime/segment),fade=smoothstep(DEMO_HOLD_SEC/segment,1.0,local);\n"
-"  return mixLook(DEMO_TOUR[sceneAt(segmentIndex)],DEMO_TOUR[sceneAt(segmentIndex+1)],fade);\n"
-"}\n"
-"float demoSize(){\n"
-"  float phase=mod(iTime,DEMO_SIZE_SEC)/DEMO_SIZE_SEC;\n"
-"  float swell=0.5-0.5*cos(6.2831853*phase);\n"
-"  float ripple=0.08*swell*(1.0-swell)*sin(12.5663706*phase-0.6);\n"
-"  return swell+ripple;\n"
-"}\n"
-"\n"
-"float vnoiseWrapY(vec2 p,float perY){\n"
-"  vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);\n"
-"  float y0=mod(i.y,perY),y1=mod(i.y+1.0,perY);\n"
-"  return mix(mix(hash21(vec2(i.x,y0)),hash21(vec2(i.x+1.0,y0)),f.x),\n"
-"             mix(hash21(vec2(i.x,y1)),hash21(vec2(i.x+1.0,y1)),f.x),f.y);\n"
-"}\n"
-"// Derivative-free noise LOD is safe inside the fragment-varying disk-hit path.\n"
-"float filteredVnoiseWrapY(vec2 p,float perY,float footprint){\n"
-"  float detail=1.0-smoothstep(0.20,0.60,footprint);\n"
-"  return mix(0.5,vnoiseWrapY(p,perY),detail);\n"
-"}\n"
-"float diskNoiseFootprint(float radialScale,float angularPeriod,float swirlScale,float rc,float dSwirl,float b,float W){\n"
-"  float pixelB=W/max(iResolution.y,1.0);\n"
-"  float critical=pixelB/max(abs(b-B_CRIT),pixelB);\n"
-"  float rayFootprint=pixelB*(1.0+DISK_LOD_CRITICAL_GAIN*critical);\n"
-"  float radialFootprint=radialScale*rayFootprint;\n"
-"  float angularFootprint=angularPeriod*rayFootprint/(6.2831853*max(rc,1.0));\n"
-"  float swirlFootprint=swirlScale*abs(dSwirl)*rayFootprint;\n"
-"  return max(radialFootprint,length(vec2(angularFootprint,swirlFootprint)));\n"
-"}\n"
-"float diskBlob(float radial,float phase,float radialCenter,float radialWidth,float phaseCenter,float phaseWidth){\n"
-"  float radialWeight=1.0-smoothstep(radialWidth,radialWidth*1.35,abs(radial-radialCenter));\n"
-"  float angular=cos(6.2831853*(phase-phaseCenter));\n"
-"  float angularEdge=cos(6.2831853*phaseWidth);\n"
-"  return radialWeight*smoothstep(angularEdge,1.0,angular);\n"
-"}\n"
-"// Broad, disk-space features make matter visible without screen-locked noise.\n"
-"float diskMacroDensity(float rc,float turns,float macroSwirl,float rin,float rout,float cycleSeed,float detail){\n"
-"  float radial=clamp((rc-rin)/max(rout-rin,0.5),0.0,1.0);\n"
-"  float phase=turns+macroSwirl*0.12;\n"
-"  float p0=fract(0.08+cycleSeed*0.37),p1=fract(0.43+cycleSeed*0.61);\n"
-"  float p2=fract(0.71+cycleSeed*0.83),p3=fract(0.86+cycleSeed*0.29);\n"
-"  float density=1.0;\n"
-"  density+=0.38*diskBlob(radial,phase,0.20,0.13,p0,0.10);\n"
-"  density+=0.31*diskBlob(radial,phase,0.48,0.17,p1,0.13);\n"
-"  density+=0.27*diskBlob(radial,phase,0.76,0.12,p2,0.09);\n"
-"  density+=0.18*diskBlob(radial,phase,0.35,0.10,p3,0.07);\n"
-"  density-=0.25*diskBlob(radial,phase,0.62,0.20,fract(p0+0.12),0.12);\n"
-"  density-=0.18*diskBlob(radial,phase,0.27,0.12,fract(p1+0.20),0.10);\n"
-"  return mix(1.0,clamp(density,0.48,1.72),detail);\n"
-"}\n"
-"vec2 mirrorUV(vec2 u){return 1.0-abs(1.0-mod(u,2.0));}\n"
-"vec2 rot(vec2 v,float a){float c=cos(a),s=sin(a);return vec2(c*v.x-s*v.y,s*v.x+c*v.y);}\n"
-"vec2 lissa(float t){return vec2(0.75*sin(t*0.37)+0.25*sin(t*0.83+1.0),0.70*sin(t*0.54+2.1)+0.30*sin(t*1.07));}\n"
-"vec3 blackbody(float T){\n"
-"  float t=clamp(T,1500.0,40000.0)/100.0;\n"
-"  float r=t<=66.0?1.0:clamp(1.292936*pow(t-60.0,-0.1332047),0.0,1.0);\n"
-"  float g=t<=66.0?clamp(0.3900816*log(t)-0.6318414,0.0,1.0):clamp(1.1298909*pow(t-60.0,-0.0755148),0.0,1.0);\n"
-"  float b=t>=66.0?1.0:(t<=19.0?0.0:clamp(0.5432068*log(t-10.0)-1.1962540,0.0,1.0));\n"
-"  return vec3(r,g,b);\n"
-"}\n"
-"// Six isolated sources plus two three-star clusters. Their catalogue lives\n"
-"// inside the camera-facing sky cone, then gets a launch-seeded offset and\n"
-"// rotation, keeping a sparse but visible lensed field on every run.\n"
-"const vec2 STAR_CATALOG[12]=vec2[12](\n"
-"  vec2(-0.66,0.39),vec2(0.42,0.58),vec2(-0.13,-0.64),\n"
-"  vec2(0.67,-0.13),vec2(0.21,0.08),vec2(-0.56,-0.24),\n"
-"  vec2(-0.31,0.22),vec2(-0.25,0.26),vec2(-0.36,0.15),\n"
-"  vec2(0.35,-0.25),vec2(0.41,-0.20),vec2(0.29,-0.32));\n"
-"vec3 stars(vec3 d){\n"
-"  float angle=6.2831853*hash21(vec2(uSceneSeed*43.0,23.0));\n"
-"  vec2 offset=(vec2(hash21(vec2(uSceneSeed*17.0,7.0)),\n"
-"                    hash21(vec2(uSceneSeed*29.0,13.0)))-0.5)*0.16;\n"
-"  float layoutScale=0.84+0.12*hash21(vec2(uSceneSeed*61.0,31.0));\n"
-"  float aspect=iResolution.x/max(iResolution.y,1.0);\n"
-"  float core=3.2/max(iResolution.y,1.0);\n"
-"  vec3 field=vec3(0.0);\n"
-"  for(int i=0;i<12;i++){\n"
-"    vec2 plane=rot(STAR_CATALOG[i]*layoutScale,angle)+offset;\n"
-"    vec3 source=normalize(vec3(plane*vec2(0.5*aspect,0.5),-1.0));\n"
-"    float scale=i<6?1.35:0.95;float radius=core*(i<6?1.0:0.82);\n"
-"    float dist2=dot(d-source,d-source);\n"
-"    float spark=1.0-smoothstep(radius*radius,(radius*2.4)*(radius*2.4),dist2);\n"
-"    float hue=hash21(vec2(float(i)+0.7,uSceneSeed*37.0));\n"
-"    vec3 tint=mix(vec3(1.0,0.76,0.50),vec3(0.66,0.80,1.0),hue);\n"
-"    field+=tint*spark*scale*(0.75+0.55*hash21(vec2(float(i),11.0)));\n"
-"    if(i==6||i==9){\n"
-"      float halo=1.0-smoothstep((core*8.0)*(core*8.0),(core*20.0)*(core*20.0),dist2);\n"
-"      field+=tint*halo*0.12;\n"
-"    }\n"
-"  }\n"
-"  return field;\n"
-"}\n"
-"vec3 spaceBackground(vec2 uv){\n"
-"  // A nearly black field keeps the disk dominant without a visible nebula.\n"
-"  float gradient=0.85+0.15*uv.y;\n"
-"  return vec3(0.0012,0.0010,0.0020)*gradient;\n"
-"}\n"
-"vec3 plainBackground(vec2 uv,float aspect,float starGain){\n"
-"  vec3 d=normalize(vec3((uv-0.5)*vec2(aspect,1.0),-1.0));\n"
-"  return spaceBackground(uv)+stars(d)*starGain*0.65;\n"
-"}\n"
-"vec3 backgroundSource(vec2 lensedUv){\n"
-"  return spaceBackground(mirrorUV(lensedUv));\n"
-"}\n"
-"\n"
-"void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n"
-"  vec2 res=iResolution.xy;\n"
-"  // Ghostty supplies top-down fragment coordinates; OpenGL gl_FragCoord is bottom-up.\n"
-"  vec2 uv=vec2(fragCoord.x,res.y-fragCoord.y)/res;float aspect=res.x/res.y;\n"
-"  float yUp=1.0-uv.y;float driftTime=iTime*DRIFT_SPEED;\n"
-"  DiskLook L=demoLook();\n"
-"  L.star*=clamp(uStarGain,0.0,1.0)/0.30;\n"
-"  L.opac=clamp(L.opac*clamp(uDiskOpacity,0.0,1.0)/0.90,0.0,1.0);\n"
-"  L.dopp=clamp(L.dopp*clamp(uDoppler,0.0,1.0)/0.60,0.0,1.0);\n"
-"  float rotationPhase=iTime*DRIFT_SPEED*abs(L.speed);\n"
-"  float rin=max(L.inner,1.6),rout=max(L.outer,rin+0.5);\n"
-"  float size=demoSize(),rh=mix(0.090,0.145,size);\n"
-"  float margin=clamp(1.45*rh+0.04,0.09,0.30),xMargin=margin/aspect;\n"
-"  vec2 roamLo=vec2(min(xMargin,0.5),margin),roamHi=vec2(max(0.5,1.0-xMargin),1.0-margin);\n"
-"  vec2 center=(roamLo+roamHi)*0.5+lissa(driftTime*0.25)*((roamHi-roamLo)*0.38);\n"
-"  center=clamp(center,roamLo,roamHi);\n"
-"  vec3 plainBg=plainBackground(uv,aspect,L.star);\n"
-"  float dil=1.0;\n"
-"  float shield=smoothstep(WORK_AREA,WORK_AREA+0.18,yUp);\n"
-"  vec2 p=(uv-center)*vec2(aspect,1.0);float plen=length(p);\n"
-"  float W=B_CRIT/max(rh,1e-4);vec2 pr=rot(vec2(p.x,-p.y),L.roll)*W;float b=length(pr);\n"
-"  float window=exp(-pow(plen/(7.0*rh),2.0));\n"
-"  float bmax=rout+3.0;float Z0=max(14.0,rout+5.0);\n"
-"  // The direct sky is fixed. Only the strong-deflection core replaces it\n"
-"  // with ray-direction stars, so distant sources never follow center.\n"
-"  float lensBlend=1.0-smoothstep(B_CRIT*1.35,B_CRIT*2.70,b);\n"
-"  if(b>=bmax){fragColor=vec4(plainBg,1.0);return;}\n"
-"  vec3 x=vec3(pr,Z0),v=vec3(0.0,0.0,-1.0);float h2=dot(pr,pr);\n"
-"  float ci=cos(L.incl),si=sin(L.incl);vec3 n=vec3(0.0,si,ci),e2=vec3(0.0,ci,-si);\n"
-"  float sdir=L.speed<0.0?-1.0:1.0;\n"
-"  vec3 emitc=vec3(0.0);float trans=1.0;bool captured=false;\n"
-"  float sPrev=dot(x,n);vec3 xPrev=x;\n"
-"  for(int i=0;i<N_STEPS;i++){\n"
-"    float r2=dot(x,x);if(r2<1.0){captured=true;break;}\n"
-"    if(x.z<-Z0&&v.z<0.0)break;if(r2>4.0*Z0*Z0)break;\n"
-"    float r=sqrt(r2);float dt=clamp(0.16*r,0.03,1.5);\n"
-"    // Resolve grazing intersections with the infinitesimally thin disk plane.\n"
-"    float planeRate=dot(v,n);\n"
-"    if(sPrev*planeRate<0.0&&abs(planeRate)>1e-3){\n"
-"      float tPlane=abs(sPrev)/abs(planeRate);\n"
-"      dt=min(dt,1.10*tPlane);\n"
-"    }\n"
-"    vec3 a=-1.5*h2*x/(r2*r2*r);v+=a*(0.5*dt);x+=v*dt;\n"
-"    r2=dot(x,x);r=sqrt(r2);a=-1.5*h2*x/(r2*r2*r);v+=a*(0.5*dt);\n"
-"    float s=dot(x,n);\n"
-"    if(s*sPrev<0.0&&trans>0.02){float tc=sPrev/(sPrev-s);vec3 xc=mix(xPrev,x,tc);\n"
-"      float rc=length(xc);if(rc>rin&&rc<rout){\n"
-"        float band=smoothstep(rin,rin*1.25,rc)*(1.0-smoothstep(rout*0.70,rout,rc));\n"
-"        float phi=atan(dot(xc,e2),xc.x),turns=phi/6.2831853,kep=pow(rin/rc,1.5);\n"
-"        float gloc=sqrt(max(1.0-1.5/rc,0.02));\n"
-"        float swirl=rc*L.wind*0.12-rotationPhase*kep*gloc*dil*sdir;\n"
-"        vec2 streakA=vec2(rc*2.8,turns*19.0+swirl*3.0);\n"
-"        vec2 streakB=vec2(rc*1.0,turns*9.0+swirl*1.5+7.0);\n"
-"        float dKep=-1.5*kep/rc;\n"
-"        float dGloc=0.75/(rc*rc*max(gloc,1e-3));\n"
-"        float dSwirl=0.12*L.wind-rotationPhase*dil*sdir*(dKep*gloc+kep*dGloc);\n"
-"        float footprintA=diskNoiseFootprint(2.8,19.0,3.0,rc,dSwirl,b,W);\n"
-"        float footprintB=diskNoiseFootprint(1.0,9.0,1.5,rc,dSwirl,b,W);\n"
-"        // The impact-parameter footprint is least exact in the bright inner\n"
-"        // annulus. Filter only partially unresolved fine streaks there.\n"
-"        float innerRing=1.0-smoothstep(1.15*rin,1.70*rin,rc);\n"
-"        float partialUnresolved=smoothstep(0.15,0.45,max(footprintA,footprintB));\n"
-"        float ringLodBoost=1.0+1.25*innerRing*partialUnresolved;\n"
-"        footprintA*=ringLodBoost;footprintB*=ringLodBoost;\n"
-"        float streaks=filteredVnoiseWrapY(streakA,19.0,footprintA)*0.65\n"
-"                     +filteredVnoiseWrapY(streakB,9.0,footprintB)*0.35;\n"
-"        streaks=0.35+L.contr*streaks*streaks;\n"
-"        float macroCycle=floor(iTime/MACRO_CYCLE_SEC);\n"
-"        float macroTime=mod(iTime,MACRO_CYCLE_SEC);\n"
-"        float macroLife=smoothstep(0.0,MACRO_FADE_SEC,macroTime)\n"
-"                       *(1.0-smoothstep(MACRO_CYCLE_SEC-MACRO_FADE_SEC,MACRO_CYCLE_SEC,macroTime));\n"
-"        float macroRotation=macroTime*DRIFT_SPEED*abs(L.speed);\n"
-"        float macroSwirl=rc*L.wind*0.12-macroRotation*kep*gloc*dil*sdir;\n"
-"        float dMacroSwirl=0.12*L.wind-macroRotation*dil*sdir*(dKep*gloc+kep*dGloc);\n"
-"        float macroFootprint=diskNoiseFootprint(1.0/max(rout-rin,0.5),1.0,0.12,rc,dMacroSwirl,b,W);\n"
-"        float macroDetail=1.0-smoothstep(0.020,0.075,macroFootprint);\n"
-"        float macroSeed=hash21(vec2(macroCycle,17.0));\n"
-"        float macroDensity=diskMacroDensity(rc,turns,macroSwirl,rin,rout,macroSeed,macroLife*macroDetail);\n"
-"        vec3 gasdir=normalize(cross(n,xc))*sdir;\n"
-"        float beta=clamp(inversesqrt(max(2.0*(rc-1.0),0.2)),0.0,0.99);\n"
-"        float g2=gloc/max(1.0+beta*dot(gasdir,normalize(v)),0.05);g2=mix(1.0,g2,L.dopp);\n"
-"        float xpr=max(1.0-sqrt(rin/rc),0.0);\n"
-"        float tprof=pow(rin/rc,0.75)*pow(xpr,0.25)/0.488;\n"
-"        vec3 cbb=blackbody(L.temp*tprof*g2);float boost=pow(g2,L.beam);\n"
-"        float density=band*streaks*macroDensity;\n"
-"        emitc+=trans*cbb*(L.gain*2.2*density*tprof*tprof*boost);\n"
-"        trans*=1.0-clamp(L.opac*density,0.0,1.0);\n"
-"    }}\n"
-"    sPrev=s;xPrev=x;\n"
-"  }\n"
-"  if(!captured&&dot(x,x)<4.0)captured=true;\n"
-"  vec3 bg=vec3(0.0);\n"
-"  if(!captured){vec3 d=normalize(v);bg+=stars(d)*L.star*window*shield;\n"
-"    if(d.z<-0.05){float tpl=(-LENS_DEPTH-x.z)/d.z;vec3 hp=x+d*tpl;\n"
-"      vec2 q=rot(hp.xy,-L.roll)/W,sp=vec2(q.x,-q.y);\n"
-"      vec2 suv=center+(p+(sp-p)*window*shield)/vec2(aspect,1.0);\n"
-"      float toward=smoothstep(0.05,0.35,-d.z);bg+=backgroundSource(suv)*toward;\n"
-"  }}\n"
-"  vec3 sky=mix(plainBg,bg,lensBlend);\n"
-"  vec3 col=sky*trans+(vec3(1.0)-exp(-emitc*L.expo));\n"
-"  fragColor=vec4(col,1.0);\n"
-"}\n"
-"out vec4 _fragOut;\n"
-"void main(){vec4 c;mainImage(c,gl_FragCoord.xy);_fragOut=c;}\n";
+// Canonical GLSL lives in blackhole_screensaver.glsl. The checked-in generated
+// include is compiled into this translation unit; no shader file is read
+// by the running .scr. Regenerate it with tools\generate-shader-include.ps1.
+static const char shaderSource[] =
+#include "generated/blackhole_screensaver_frag.inc"
+;
 
 // ============================================================ fullscreen quad ==
 static const char* vertSrc =
@@ -373,17 +169,6 @@ static const char* vertSrc =
 "  vUv = vec2((x + 1.0) * 0.5, (y + 1.0) * 0.5);\n"
 "  gl_Position = vec4(x, y, 0.0, 1.0);\n"
 "}\n";
-
-static const char* fragHeader =
-"#version 330\n"
-"in vec2 vUv;\n"
-"uniform float iTime;\n"
-"uniform vec2  iResolution;\n"
-"uniform float uStarGain;\n"
-"uniform float uDiskOpacity;\n"
-"uniform float uDoppler;\n"
-"uniform float uSceneSeed;\n"
-"\n";
 
 // ============================================================ GL helpers ==
 // GL extension function pointer types
@@ -400,6 +185,7 @@ typedef void (APIENTRY *PFNGLUSEPROGRAMPROC)(GLuint);
 typedef GLint (APIENTRY *PFNGLGETUNIFORMLOCATIONPROC)(GLuint, const GLchar*);
 typedef void (APIENTRY *PFNGLUNIFORM1FPROC)(GLint, GLfloat);
 typedef void (APIENTRY *PFNGLUNIFORM2FPROC)(GLint, GLfloat, GLfloat);
+typedef void (APIENTRY *PFNGLUNIFORM4FPROC)(GLint, GLfloat, GLfloat, GLfloat, GLfloat);
 typedef GLsync (APIENTRY *PFNGLFENCESYNCPROC)(GLenum, GLbitfield);
 typedef GLenum (APIENTRY *PFNGLCLIENTWAITSYNCPROC)(GLsync, GLbitfield, GLuint64);
 typedef void (APIENTRY *PFNGLDELETESYNCPROC)(GLsync);
@@ -442,12 +228,14 @@ static PFNGLUSEPROGRAMPROC          glUseProgram;
 static PFNGLGETUNIFORMLOCATIONPROC  glGetUniformLocation;
 static PFNGLUNIFORM1FPROC           glUniform1f;
 static PFNGLUNIFORM2FPROC           glUniform2f;
+static PFNGLUNIFORM4FPROC           glUniform4f;
 static PFNGLFENCESYNCPROC           p_glFenceSync;
 static PFNGLCLIENTWAITSYNCPROC      p_glClientWaitSync;
 static PFNGLDELETESYNCPROC          p_glDeleteSync;
 
 static GLuint shaderProgram;
-static GLint  uTime = -1, uResolution = -1, uStarGain = -1, uDiskOpacity = -1, uDoppler = -1, uSceneSeed = -1;
+static GLint  uTime = -1, uResolution = -1, uStarGain = -1, uDiskOpacity = -1, uDoppler = -1, uSceneSeed = -1, uSkySeed = -1;
+static GLint  uSceneCenter = -1, uApparentRadius = -1, uDiskLookA = -1, uDiskLookB = -1, uDiskLookC = -1, uSceneExposure = -1;
 static GLuint vao;
 
 static void* getGLProc(const char* name) {
@@ -471,6 +259,7 @@ static int loadGLFunctions(void) {
     glGetUniformLocation = (void*)getGLProc("glGetUniformLocation");
     glUniform1f          = (void*)getGLProc("glUniform1f");
     glUniform2f          = (void*)getGLProc("glUniform2f");
+    glUniform4f          = (void*)getGLProc("glUniform4f");
     p_glFenceSync        = (void*)getGLProc("glFenceSync");
     p_glClientWaitSync   = (void*)getGLProc("glClientWaitSync");
     p_glDeleteSync       = (void*)getGLProc("glDeleteSync");
@@ -487,7 +276,7 @@ static int loadGLFunctions(void) {
     return glCreateShader && glShaderSource && glCompileShader && glGetShaderiv &&
         glGetShaderInfoLog && glCreateProgram && glAttachShader && glLinkProgram &&
         glGetProgramiv && glUseProgram && glGetUniformLocation && glUniform1f &&
-        glUniform2f && p_glGenVertexArrays && p_glBindVertexArray &&
+        glUniform2f && glUniform4f && p_glGenVertexArrays && p_glBindVertexArray &&
         p_glGetProgramInfoLog;
 }
 
@@ -531,14 +320,19 @@ static GLfloat makeSceneSeed(void) {
     return (GLfloat)(seed & 0x00ffffffu) * (1.0f / 16777216.0f);
 }
 
-static int initShader(void) {
-    // Build the full fragment source: header + shader body
-    char* fullFrag = (char*)malloc(strlen(fragHeader) + strlen(shaderSource) + 256);
-    sprintf(fullFrag, "%s%s", fragHeader, shaderSource);
+static void signalShaderSmokeReady(void) {
+    char eventName[128];
+    DWORD length = GetEnvironmentVariableA("BLACKHOLE_SHADER_SMOKE_EVENT", eventName, sizeof(eventName));
+    if (length == 0 || length >= sizeof(eventName)) return;
+    g_shaderSmokeEvent = CreateEventA(NULL, TRUE, FALSE, eventName);
+    if (g_shaderSmokeEvent) SetEvent(g_shaderSmokeEvent);
+}
 
+static int initShader(void) {
+    // shaderSource is the deterministic generated form of the canonical
+    // GLSL file, already including #version and all fragment uniforms.
     GLuint vs = compileShader(GL_VERTEX_SHADER_ARB, vertSrc);
-    GLuint fs = compileShader(GL_FRAGMENT_SHADER_ARB, fullFrag);
-    free(fullFrag);
+    GLuint fs = compileShader(GL_FRAGMENT_SHADER_ARB, shaderSource);
 
     shaderProgram = glCreateProgram();
     glAttachShader(shaderProgram, vs);
@@ -554,7 +348,7 @@ static int initShader(void) {
         char path[MAX_PATH];
         getLogPath(path, sizeof(path));
         FILE* f = fopen(path, "w");
-        if (f) { fprintf(f, "LINK ERROR:\n%s\n\nFRAGMENT SOURCE:\n%s%s\n", log, fragHeader, shaderSource); fclose(f); }
+        if (f) { fprintf(f, "LINK ERROR:\n%s\n\nFRAGMENT SOURCE:\n%s\n", log, shaderSource); fclose(f); }
         return 0;
     }
 
@@ -565,7 +359,13 @@ static int initShader(void) {
     uDiskOpacity= glGetUniformLocation(shaderProgram, "uDiskOpacity");
     uDoppler    = glGetUniformLocation(shaderProgram, "uDoppler");
     uSceneSeed  = glGetUniformLocation(shaderProgram, "uSceneSeed");
-    if (uSceneSeed >= 0) glUniform1f(uSceneSeed, g_sceneSeed);
+    uSkySeed    = glGetUniformLocation(shaderProgram, "uSkySeed");
+    uSceneCenter = glGetUniformLocation(shaderProgram, "uSceneCenter");
+    uApparentRadius = glGetUniformLocation(shaderProgram, "uApparentRadius");
+    uDiskLookA = glGetUniformLocation(shaderProgram, "uDiskLookA");
+    uDiskLookB = glGetUniformLocation(shaderProgram, "uDiskLookB");
+    uDiskLookC = glGetUniformLocation(shaderProgram, "uDiskLookC");
+    uSceneExposure = glGetUniformLocation(shaderProgram, "uSceneExposure");
 
     // empty VAO — needed by some drivers even with gl_VertexID
     p_glGenVertexArrays(1, &vao);
@@ -575,30 +375,91 @@ static int initShader(void) {
 }
 
 // ============================================================ registry ==
-static void loadConfig(void) {
-    HKEY key;
-    if (RegOpenKeyExA(HKEY_CURRENT_USER, REG_KEY, 0, KEY_READ, &key) == ERROR_SUCCESS) {
-        DWORD sz = sizeof(DWORD), type;
-        DWORD v;
-        if (RegQueryValueExA(key, "StarBrightness", NULL, &type, (LPBYTE)&v, &sz) == ERROR_SUCCESS)
-            cfg_starBrightness = (int)v;
-        if (RegQueryValueExA(key, "DiskOpacity", NULL, &type, (LPBYTE)&v, &sz) == ERROR_SUCCESS)
-            cfg_diskOpacity = (int)v;
-        if (RegQueryValueExA(key, "Doppler", NULL, &type, (LPBYTE)&v, &sz) == ERROR_SUCCESS)
-            cfg_doppler = (int)v;
-        RegCloseKey(key);
-    }
+static ConfigValues makeDefaultConfig(void) {
+    ConfigValues config;
+    config.starBrightness = CONFIG_DEFAULT_STAR_BRIGHTNESS;
+    config.diskOpacity = CONFIG_DEFAULT_DISK_OPACITY;
+    config.doppler = CONFIG_DEFAULT_DOPPLER;
+    return config;
 }
 
-static void saveConfig(void) {
+static int configValueIsValid(int value) {
+    return value >= CONFIG_VALUE_MIN && value <= CONFIG_VALUE_MAX;
+}
+
+static void applyConfig(const ConfigValues* config) {
+    cfg_starBrightness = config->starBrightness;
+    cfg_diskOpacity = config->diskOpacity;
+    cfg_doppler = config->doppler;
+}
+
+static ConfigRegistryValueStatus readRegistryDword(HKEY key, const char* valueName, DWORD* value) {
+    DWORD type = 0;
+    DWORD bytes = sizeof(DWORD);
+    DWORD raw = 0;
+    LONG result = RegQueryValueExA(key, valueName, NULL, &type, (LPBYTE)&raw, &bytes);
+    if (result == ERROR_FILE_NOT_FOUND) return CONFIG_REGISTRY_VALUE_MISSING;
+    if (result != ERROR_SUCCESS) return CONFIG_REGISTRY_VALUE_INVALID;
+    if (type != REG_DWORD || bytes != sizeof(DWORD)) return CONFIG_REGISTRY_VALUE_INVALID;
+    *value = raw;
+    return CONFIG_REGISTRY_VALUE_VALID;
+}
+
+static int readValidatedConfigValue(HKEY key, const char* valueName, int fallback) {
+    DWORD value = 0;
+    ConfigRegistryValueStatus status = readRegistryDword(key, valueName, &value);
+    if (status != CONFIG_REGISTRY_VALUE_VALID) return fallback;
+    if (value > (DWORD)CONFIG_VALUE_MAX) return fallback;
+    return (int)value;
+}
+
+static int writeRegistryDword(HKEY key, const char* valueName, DWORD value) {
+    return RegSetValueExA(key, valueName, 0, REG_DWORD, (const BYTE*)&value, sizeof(value)) == ERROR_SUCCESS;
+}
+
+static void loadConfig(void) {
+    ConfigValues config = makeDefaultConfig();
     HKEY key;
-    if (RegCreateKeyExA(HKEY_CURRENT_USER, REG_KEY, 0, NULL, 0, KEY_SET_VALUE, NULL, &key, NULL) == ERROR_SUCCESS) {
-        DWORD v;
-        v = cfg_starBrightness; RegSetValueExA(key, "StarBrightness", 0, REG_DWORD, (LPBYTE)&v, sizeof(DWORD));
-        v = cfg_diskOpacity;    RegSetValueExA(key, "DiskOpacity",    0, REG_DWORD, (LPBYTE)&v, sizeof(DWORD));
-        v = cfg_doppler;        RegSetValueExA(key, "Doppler",        0, REG_DWORD, (LPBYTE)&v, sizeof(DWORD));
-        RegCloseKey(key);
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, REG_KEY, 0, KEY_READ, &key) != ERROR_SUCCESS) {
+        applyConfig(&config);
+        return;
     }
+
+    DWORD schemaVersion = 0;
+    ConfigRegistryValueStatus schemaStatus = readRegistryDword(key, REG_VALUE_CONFIG_SCHEMA_VERSION, &schemaVersion);
+    // No marker is a supported M3-and-earlier configuration. A present marker
+    // must be exactly the current schema before its values are interpreted.
+    if (schemaStatus == CONFIG_REGISTRY_VALUE_MISSING) {
+        config.starBrightness = readValidatedConfigValue(key, "StarBrightness", config.starBrightness);
+        config.diskOpacity = readValidatedConfigValue(key, "DiskOpacity", config.diskOpacity);
+        config.doppler = readValidatedConfigValue(key, "Doppler", config.doppler);
+    } else if (schemaStatus == CONFIG_REGISTRY_VALUE_VALID && schemaVersion == CONFIG_SCHEMA_VERSION) {
+        config.starBrightness = readValidatedConfigValue(key, "StarBrightness", config.starBrightness);
+        config.diskOpacity = readValidatedConfigValue(key, "DiskOpacity", config.diskOpacity);
+        config.doppler = readValidatedConfigValue(key, "Doppler", config.doppler);
+    }
+    // Invalid or future version markers intentionally preserve safe defaults.
+    RegCloseKey(key);
+    applyConfig(&config);
+}
+
+static int saveConfig(const ConfigValues* config) {
+    HKEY key;
+    int success;
+    if (!configValueIsValid(config->starBrightness) ||
+        !configValueIsValid(config->diskOpacity) ||
+        !configValueIsValid(config->doppler)) return 0;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, REG_KEY, 0, NULL, 0, KEY_SET_VALUE, NULL, &key, NULL) != ERROR_SUCCESS)
+        return 0;
+
+    // Write the marker last. A failed first save therefore remains readable as
+    // legacy data rather than claiming a complete current-version schema.
+    success = writeRegistryDword(key, "StarBrightness", (DWORD)config->starBrightness);
+    success = writeRegistryDword(key, "DiskOpacity", (DWORD)config->diskOpacity) && success;
+    success = writeRegistryDword(key, "Doppler", (DWORD)config->doppler) && success;
+    success = writeRegistryDword(key, REG_VALUE_CONFIG_SCHEMA_VERSION, CONFIG_SCHEMA_VERSION) && success;
+    RegCloseKey(key);
+    return success;
 }
 
 // ============================================================ config dialog ==
@@ -680,10 +541,15 @@ static LRESULT CALLBACK ConfigWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_COMMAND: {
         int id = LOWORD(wp);
         if (id == CFG_ID_OK) {
-            cfg_starBrightness = (int)SendDlgItemMessage(hwnd, CFG_ID_STAR_SLIDER,   TBM_GETPOS, 0, 0);
-            cfg_diskOpacity    = (int)SendDlgItemMessage(hwnd, CFG_ID_DISK_SLIDER,   TBM_GETPOS, 0, 0);
-            cfg_doppler        = (int)SendDlgItemMessage(hwnd, CFG_ID_DOPPLER_SLIDER, TBM_GETPOS, 0, 0);
-            saveConfig();
+            ConfigValues pending;
+            pending.starBrightness = (int)SendDlgItemMessage(hwnd, CFG_ID_STAR_SLIDER,   TBM_GETPOS, 0, 0);
+            pending.diskOpacity = (int)SendDlgItemMessage(hwnd, CFG_ID_DISK_SLIDER,   TBM_GETPOS, 0, 0);
+            pending.doppler = (int)SendDlgItemMessage(hwnd, CFG_ID_DOPPLER_SLIDER, TBM_GETPOS, 0, 0);
+            if (!saveConfig(&pending)) {
+                MessageBoxA(hwnd, "Settings could not be saved.", "BlackHole Screensaver Settings", MB_OK | MB_ICONERROR);
+                return 0;
+            }
+            applyConfig(&pending);
             DestroyWindow(hwnd);
             return 0;
         }
@@ -775,6 +641,10 @@ static int initOpenGL(HWND hwnd) {
 static void shutdownRenderer(void) {
     g_frameSubmitTick = 0;
     g_nextFrameEligibleTick = 0;
+    if (g_shaderSmokeEvent) {
+        CloseHandle(g_shaderSmokeEvent);
+        g_shaderSmokeEvent = NULL;
+    }
     if (hRC && hDC) {
         if (wglMakeCurrent(hDC, hRC)) {
             if (g_frameFence && p_glDeleteSync) p_glDeleteSync(g_frameFence);
@@ -800,10 +670,11 @@ static void completeFrameSchedule(ULONGLONG completedTick) {
         elapsed = completedTick - g_frameSubmitTick;
 
     // A completion observed within two timer periods is already governed by
-    // the 100 fps cap. Longer frames get enough rest to avoid continuous GPU
-    // saturation, bounded so a transient stall cannot make the saver inert.
+    // the 100 fps cap. Longer frames receive a bounded fractional rest: the
+    // one-frame fence still prevents queue growth, while this avoids doubling
+    // every measured GPU frame interval and causing visible sky-motion jumps.
     if (elapsed > FRAME_COOLDOWN_TRIGGER_MS) {
-        cooldown = elapsed - FRAME_INTERVAL_MS;
+        cooldown = (elapsed - FRAME_INTERVAL_MS) / FRAME_COOLDOWN_DIVISOR;
         if (cooldown > FRAME_COOLDOWN_MAX_MS) cooldown = FRAME_COOLDOWN_MAX_MS;
     }
     g_frameSubmitTick = 0;
@@ -875,20 +746,49 @@ static int presentPreparedFrame(void) {
     return 1;
 }
 
+static SceneState makeSceneState(ULONGLONG now) {
+    SceneState state;
+    state.elapsedSeconds = (float)(now - g_tick0) / 1000.0f;
+    state.resolutionX = (float)g_W;
+    state.resolutionY = (float)g_H;
+    // M4 guarantees bounded persisted controls; keep this compatible raw
+    // percentage-to-uniform mapping while GLSL clamps remain defense in depth.
+    state.starGain = (float)cfg_starBrightness / 100.0f;
+    state.diskOpacity = (float)cfg_diskOpacity / 100.0f;
+    state.doppler = (float)cfg_doppler / 100.0f;
+    state.sceneSeed = g_sceneSeed;
+    state.skySeed = g_skySeed;
+    state.scene = STATIC_SCHWARZSCHILD;
+    return state;
+}
+
+static void uploadSceneState(const SceneState* state) {
+    glUniform1f(uTime, state->elapsedSeconds);
+    glUniform2f(uResolution, state->resolutionX, state->resolutionY);
+    if (uStarGain >= 0)    glUniform1f(uStarGain, state->starGain);
+    if (uDiskOpacity >= 0) glUniform1f(uDiskOpacity, state->diskOpacity);
+    if (uDoppler >= 0)     glUniform1f(uDoppler, state->doppler);
+    if (uSceneSeed >= 0)   glUniform1f(uSceneSeed, state->sceneSeed);
+    // M6 retains sceneSeed as a future material-only seed. The static scene
+    // itself never reads it for center, radius, inclination, roll, or look.
+    if (uSkySeed >= 0)     glUniform1f(uSkySeed, state->skySeed);
+    if (uSceneCenter >= 0) glUniform2f(uSceneCenter, state->scene.centerX, state->scene.centerY);
+    if (uApparentRadius >= 0) glUniform1f(uApparentRadius, state->scene.apparentRadius);
+    if (uDiskLookA >= 0) glUniform4f(uDiskLookA, state->scene.temperature, state->scene.inclination, state->scene.roll, state->scene.innerRadius);
+    if (uDiskLookB >= 0) glUniform4f(uDiskLookB, state->scene.outerRadius, state->scene.baselineOpacity, state->scene.baselineDoppler, state->scene.beam);
+    if (uDiskLookC >= 0) glUniform4f(uDiskLookC, state->scene.gain, state->scene.contrast, state->scene.wind, state->scene.materialSpeed);
+    if (uSceneExposure >= 0) glUniform1f(uSceneExposure, state->scene.exposure);
+}
 static int renderFrame(int present) {
     ULONGLONG now = GetTickCount64();
-    float t = (float)(now - g_tick0) / 1000.0f;
+    const SceneState state = makeSceneState(now);
 
     glViewport(0, 0, g_W, g_H);
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glUseProgram(shaderProgram);
-    glUniform1f(uTime, t);
-    glUniform2f(uResolution, (float)g_W, (float)g_H);
-    if (uStarGain >= 0)    glUniform1f(uStarGain, (float)cfg_starBrightness / 100.0f);
-    if (uDiskOpacity >= 0) glUniform1f(uDiskOpacity, (float)cfg_diskOpacity / 100.0f);
-    if (uDoppler >= 0)     glUniform1f(uDoppler, (float)cfg_doppler / 100.0f);
+    uploadSceneState(&state);
 
     // fullscreen quad
     p_glBindVertexArray(vao);
@@ -1080,9 +980,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmdLine, int show
         return 1;
     }
 
-    // Immutable for this run: it randomizes the four-look tour without
-    // introducing host-side current/next scene state.
+    // Separate immutable run seeds are owned by the host. The active shader
+    // uses skySeed for its per-launch catalogue, offset, and flow direction;
+    // sceneSeed remains reserved for a future material-only variation.
     g_sceneSeed = makeSceneSeed();
+    g_skySeed = makeSceneSeed();
     if (!initShader()) {
         shutdownRenderer();
         DestroyWindow(hwnd);
@@ -1110,6 +1012,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmdLine, int show
         if (g_frameFence && p_glDeleteSync) p_glDeleteSync(g_frameFence);
         g_frameFence = NULL;
         resetFrameSchedule(GetTickCount64());
+        // The smoke event is set only after OpenGL initialization, shader
+        // compile/link, and the hidden first present have all completed.
+        signalShaderSmokeReady();
         if (g_fullscreen) hideCursor();
         ShowWindow(hwnd, g_fullscreen ? SW_SHOWNOACTIVATE : SW_SHOW);
     }
