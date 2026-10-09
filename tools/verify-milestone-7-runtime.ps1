@@ -25,6 +25,8 @@ public static class Milestone7ConfigNative {
     public static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder className, int maxCount);
     [DllImport("user32.dll")]
     public static extern IntPtr GetDlgItem(IntPtr hDlg, int nIDDlgItem);
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr GetWindow(IntPtr hWnd, uint command);
     [DllImport("user32.dll")]
     public static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")]
@@ -47,8 +49,10 @@ $WM_COMMAND = 0x0111
 $WM_HSCROLL = 0x0114
 $SWP_NOMOVE = 0x0002
 $SWP_NOZORDER = 0x0004
+$GW_OWNER = 4
 $TBM_GETPOS = 0x0400
 $TBM_SETPOS = 0x0405
+$SETTINGS_SLIDER_UNITS = 1000
 $CFG_ID_STAR_SLIDER = 201
 $CFG_ID_DISK_SLIDER = 202
 $CFG_ID_DOPPLER_SLIDER = 203
@@ -56,11 +60,13 @@ $CFG_ID_DENSITY_SLIDER = 204
 $CFG_ID_SPEED_SLIDER = 205
 $CFG_ID_OK = 211
 $CFG_ID_CANCEL = 212
-$ADJ_ID_STAR_SLIDER = 301
-$ADJ_ID_DENSITY_SLIDER = 304
-$ADJ_ID_SPEED_SLIDER = 305
-$ADJ_ID_SAVE = 311
-$ADJ_ID_REVERT = 312
+$SETTINGS_WND_CLASS = 'BlackHoleSettings'
+$RENDERER_WND_CLASS = 'BlackHoleSCR'
+$ADJ_ID_STAR_SLIDER = $CFG_ID_STAR_SLIDER
+$ADJ_ID_DENSITY_SLIDER = $CFG_ID_DENSITY_SLIDER
+$ADJ_ID_SPEED_SLIDER = $CFG_ID_SPEED_SLIDER
+$ADJ_ID_SAVE = $CFG_ID_OK
+$ADJ_ID_REVERT = $CFG_ID_CANCEL
 
 function Fail([string]$Message) {
     throw "Milestone 7 runtime contract failure: $Message"
@@ -120,22 +126,41 @@ $script:windowSearchCallback = [Milestone7ConfigNative+EnumWindowsProc]{
     return $true
 }
 
-function Find-ProcessWindow([int]$ProcessId, [string]$ClassName) {
-    $script:windowSearchProcessId = $ProcessId
-    $script:windowSearchClassName = $ClassName
-    $script:windowSearchResult = [IntPtr]::Zero
-    [void][Milestone7ConfigNative]::EnumWindows($script:windowSearchCallback, [IntPtr]::Zero)
-    return $script:windowSearchResult
+function Find-ProcessWindow([System.Diagnostics.Process]$Process, [string]$ClassName) {
+    $Process.Refresh()
+    if ($Process.MainWindowHandle -ne [IntPtr]::Zero) {
+        $classBuffer = New-Object Text.StringBuilder 128
+        [void][Milestone7ConfigNative]::GetClassName($Process.MainWindowHandle, $classBuffer, $classBuffer.Capacity)
+        if ($classBuffer.ToString() -eq $ClassName) { return $Process.MainWindowHandle }
+    }
+    return [IntPtr]::Zero
+}
+
+function Wait-ForSettingsPalette([System.Diagnostics.Process]$Process, [string]$Label) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(8)
+    do {
+        $Process.Refresh()
+        if ($Process.MainWindowHandle -ne [IntPtr]::Zero) {
+            $owner = $Process.MainWindowHandle
+            $script:windowSearchProcessId = $Process.Id
+            $script:windowSearchClassName = $SETTINGS_WND_CLASS
+            $script:windowSearchResult = [IntPtr]::Zero
+            [void][Milestone7ConfigNative]::EnumWindows($script:windowSearchCallback, [IntPtr]::Zero)
+            if ($script:windowSearchResult -ne [IntPtr]::Zero -and
+                [Milestone7ConfigNative]::GetWindow($script:windowSearchResult, $GW_OWNER) -eq $owner) {
+                return $script:windowSearchResult
+            }
+        }
+        Start-Sleep -Milliseconds 50
+    } while (!$Process.HasExited -and [DateTime]::UtcNow -lt $deadline)
+    if ($Process.HasExited) { Fail "$Label did not open (exited=$($Process.HasExited), exitCode=$($Process.ExitCode))" }
+    Fail "$Label did not open"
 }
 
 function Wait-ForWindow([System.Diagnostics.Process]$Process, [string]$ClassName, [string]$Label) {
     $deadline = [DateTime]::UtcNow.AddSeconds(8)
     do {
-        # Process.MainWindowHandle is reliable for the active top-level window.
-        # Class-based enumeration is only a fallback for hosts that do not set it.
-        $Process.Refresh()
-        if ($Process.MainWindowHandle -ne [IntPtr]::Zero) { return $Process.MainWindowHandle }
-        $window = Find-ProcessWindow $Process.Id $ClassName
+        $window = Find-ProcessWindow $Process $ClassName
         if ($window -ne [IntPtr]::Zero) { return $window }
         Start-Sleep -Milliseconds 50
     } while (!$Process.HasExited -and [DateTime]::UtcNow -lt $deadline)
@@ -179,12 +204,20 @@ function Set-SliderPosition([IntPtr]$Window, [int]$ControlId, [int]$Position) {
     [void][Milestone7ConfigNative]::SendMessage($Window, $WM_HSCROLL, [IntPtr]::Zero, $slider)
 }
 
+function To-NormalizedPosition([int]$Value, [int]$Minimum, [int]$Maximum) {
+    return [int](($Value - $Minimum) * $SETTINGS_SLIDER_UNITS / ($Maximum - $Minimum))
+}
+
 function Assert-Sliders([IntPtr]$Window, [int]$Star, [int]$Disk, [int]$Doppler, [int]$Density, [int]$Speed) {
-    Assert-Equal (Get-SliderPosition $Window $CFG_ID_STAR_SLIDER) $Star 'star brightness slider'
-    Assert-Equal (Get-SliderPosition $Window $CFG_ID_DISK_SLIDER) $Disk 'disk opacity slider'
-    Assert-Equal (Get-SliderPosition $Window $CFG_ID_DOPPLER_SLIDER) $Doppler 'Doppler slider'
-    Assert-Equal (Get-SliderPosition $Window $CFG_ID_DENSITY_SLIDER) $Density 'star density slider'
-    Assert-Equal (Get-SliderPosition $Window $CFG_ID_SPEED_SLIDER) $Speed 'sky flow speed slider'
+    Assert-Equal (Get-SliderPosition $Window $CFG_ID_STAR_SLIDER) (To-NormalizedPosition $Star 0 100) 'star brightness slider'
+    Assert-Equal (Get-SliderPosition $Window $CFG_ID_DISK_SLIDER) (To-NormalizedPosition $Disk 0 100) 'disk opacity slider'
+    Assert-Equal (Get-SliderPosition $Window $CFG_ID_DOPPLER_SLIDER) (To-NormalizedPosition $Doppler 0 100) 'Doppler slider'
+    Assert-Equal (Get-SliderPosition $Window $CFG_ID_DENSITY_SLIDER) (To-NormalizedPosition $Density 50 200) 'star density slider'
+    Assert-Equal (Get-SliderPosition $Window $CFG_ID_SPEED_SLIDER) (To-NormalizedPosition $Speed 0 500) 'sky flow speed slider'
+}
+
+function Set-NormalizedSliderValue([IntPtr]$Window, [int]$ControlId, [int]$Value, [int]$Minimum, [int]$Maximum) {
+    Set-SliderPosition $Window $ControlId (To-NormalizedPosition $Value $Minimum $Maximum)
 }
 
 function Send-Command([PSCustomObject]$Window, [int]$Command) {
@@ -253,10 +286,14 @@ try {
     Assert-RejectedMode '/w unexpected'
     Assert-RejectedMode '/d unexpected'
 
-    # Missing marker/defaults: opening and closing /c must remain read-only.
+    # Missing marker/defaults: the shared /c settings window remains read-only.
     Clear-TestKey
-    $config = Start-Window '/c' 'BlackHoleConfig' '/c missing-key configuration'
+    $config = Start-Window '/c' $SETTINGS_WND_CLASS '/c missing-key configuration'
     Assert-Sliders $config.Window 30 90 60 100 100
+    Assert-ControlsInsideClient $config.Window @((201..212) + (251..255)) '/c initial layout'
+    if (![Milestone7ConfigNative]::SetWindowPos($config.Window, [IntPtr]::Zero, 0, 0, 600, 420, $SWP_NOMOVE -bor $SWP_NOZORDER)) { Fail 'could not resize /c settings window' }
+    Start-Sleep -Milliseconds 150
+    Assert-ControlsInsideClient $config.Window @((201..212) + (251..255)) '/c resized layout'
     Close-Window $config '/c missing-key close'
     if (Test-Path -LiteralPath $registryProviderKey) { Fail 'missing-key fallback unexpectedly created a registry key' }
 
@@ -267,7 +304,7 @@ try {
     Set-Dword 'Doppler' 99
     Set-Dword 'StarDensity' 200
     Set-Dword 'SkyFlowSpeed' 50
-    $config = Start-Window '/c' 'BlackHoleConfig' '/c unmarked legacy configuration'
+    $config = Start-Window '/c' $SETTINGS_WND_CLASS '/c unmarked legacy configuration'
     Assert-Sliders $config.Window 7 51 99 100 100
     Click-Command $config $CFG_ID_CANCEL '/c unmarked legacy cancel'
     Assert-NoValue 'ConfigSchemaVersion'
@@ -280,12 +317,12 @@ try {
     Set-Dword 'Doppler' 45
     Set-Dword 'StarDensity' 200
     Set-Dword 'SkyFlowSpeed' 50
-    $config = Start-Window '/c' 'BlackHoleConfig' '/c schema-v1 configuration'
+    $config = Start-Window '/c' $SETTINGS_WND_CLASS '/c schema-v1 configuration'
     Assert-Sliders $config.Window 0 100 45 100 100
     Close-Window $config '/c schema-v1 close'
     Assert-Dword 'ConfigSchemaVersion' 1
 
-    # Schema v2 independently defaults malformed/out-of-range fields.
+    # Schema v2 remains compatible, including its historical 50..200% speed range.
     Clear-TestKey
     Set-Dword 'ConfigSchemaVersion' 2
     Set-Dword 'StarBrightness' 12
@@ -293,27 +330,36 @@ try {
     Set-Dword 'Doppler' 56
     Set-Dword 'StarDensity' 200
     Set-Dword 'SkyFlowSpeed' 50
-    $config = Start-Window '/c' 'BlackHoleConfig' '/c schema-v2 configuration'
+    $config = Start-Window '/c' $SETTINGS_WND_CLASS '/c schema-v2 configuration'
     Assert-Sliders $config.Window 12 34 56 200 50
     Close-Window $config '/c schema-v2 close'
 
+    # Schema v3 independently defaults malformed/out-of-range fields while
+    # accepting a stopped (0%) or fast (500%) sky flow.
     Clear-TestKey
-    Set-Dword 'ConfigSchemaVersion' 2
+    Set-Dword 'ConfigSchemaVersion' 3
     Set-Dword 'StarBrightness' 12
     Set-String 'DiskOpacity' 'bad'
     Set-Dword 'Doppler' 56
     Set-Dword 'StarDensity' 49
-    Set-Dword 'SkyFlowSpeed' 50
-    $config = Start-Window '/c' 'BlackHoleConfig' '/c mixed bad-fields configuration'
-    Assert-Sliders $config.Window 12 90 56 100 50
-    Close-Window $config '/c mixed bad-fields close'
+    Set-Dword 'SkyFlowSpeed' 500
+    $config = Start-Window '/c' $SETTINGS_WND_CLASS '/c schema-v3 configuration'
+    Assert-Sliders $config.Window 12 90 56 100 500
+    Close-Window $config '/c schema-v3 close'
 
-    # Marker zero is deliberately invalid after an interrupted v2 save.
+    Clear-TestKey
+    Set-Dword 'ConfigSchemaVersion' 3
+    Set-Dword 'SkyFlowSpeed' 501
+    $config = Start-Window '/c' $SETTINGS_WND_CLASS '/c schema-v3 speed ceiling configuration'
+    Assert-Sliders $config.Window 30 90 60 100 100
+    Close-Window $config '/c schema-v3 speed ceiling close'
+
+    # Marker zero is deliberately invalid after an interrupted v3 save.
     Clear-TestKey
     Set-Dword 'ConfigSchemaVersion' 0
     Set-Dword 'StarBrightness' 12
     Set-Dword 'StarDensity' 200
-    $config = Start-Window '/c' 'BlackHoleConfig' '/c interrupted-save configuration'
+    $config = Start-Window '/c' $SETTINGS_WND_CLASS '/c interrupted-save configuration'
     Assert-Sliders $config.Window 30 90 60 100 100
     Close-Window $config '/c interrupted-save close'
 
@@ -321,64 +367,67 @@ try {
     Clear-TestKey
     Set-String 'ConfigSchemaVersion' 'bad'
     Set-Dword 'StarBrightness' 1
-    $config = Start-Window '/c' 'BlackHoleConfig' '/c wrong-type schema configuration'
+    $config = Start-Window '/c' $SETTINGS_WND_CLASS '/c wrong-type schema configuration'
     Assert-Sliders $config.Window 30 90 60 100 100
     Close-Window $config '/c wrong-type schema close'
 
     Clear-TestKey
-    Set-Dword 'ConfigSchemaVersion' 3
+    Set-Dword 'ConfigSchemaVersion' 4
     Set-Dword 'StarBrightness' 1
-    $config = Start-Window '/c' 'BlackHoleConfig' '/c future schema configuration'
+    $config = Start-Window '/c' $SETTINGS_WND_CLASS '/c future schema configuration'
     Assert-Sliders $config.Window 30 90 60 100 100
     Close-Window $config '/c future schema close'
 
-    # Explicit /c OK writes every field and publishes v2 only at the end.
+    # Explicit /c OK maps normalized sliders to physical values and publishes v3 last.
     Clear-TestKey
-    $config = Start-Window '/c' 'BlackHoleConfig' '/c persistence configuration'
-    Set-SliderPosition $config.Window $CFG_ID_STAR_SLIDER 12
-    Set-SliderPosition $config.Window $CFG_ID_DISK_SLIDER 34
-    Set-SliderPosition $config.Window $CFG_ID_DOPPLER_SLIDER 56
-    Set-SliderPosition $config.Window $CFG_ID_DENSITY_SLIDER 200
-    Set-SliderPosition $config.Window $CFG_ID_SPEED_SLIDER 50
+    $config = Start-Window '/c' $SETTINGS_WND_CLASS '/c persistence configuration'
+    Set-NormalizedSliderValue $config.Window $CFG_ID_STAR_SLIDER 12 0 100
+    Set-NormalizedSliderValue $config.Window $CFG_ID_DISK_SLIDER 34 0 100
+    Set-NormalizedSliderValue $config.Window $CFG_ID_DOPPLER_SLIDER 56 0 100
+    Set-NormalizedSliderValue $config.Window $CFG_ID_DENSITY_SLIDER 200 50 200
+    Set-NormalizedSliderValue $config.Window $CFG_ID_SPEED_SLIDER 500 0 500
     Click-Command $config $CFG_ID_OK '/c OK'
-    Assert-Dword 'ConfigSchemaVersion' 2
+    Assert-Dword 'ConfigSchemaVersion' 3
     Assert-Dword 'StarBrightness' 12
     Assert-Dword 'DiskOpacity' 34
     Assert-Dword 'Doppler' 56
     Assert-Dword 'StarDensity' 200
-    Assert-Dword 'SkyFlowSpeed' 50
+    Assert-Dword 'SkyFlowSpeed' 500
 
-    # /w contains live sliders; verify resize layout, Save snapshot replacement,
-    # Revert, and unsaved close without registry mutation.
-    $adjustment = Start-Window '/w' 'BlackHoleSCR' '/w adjustment window'
-    Assert-Equal (Get-SliderPosition $adjustment.Window $ADJ_ID_STAR_SLIDER) 12 '/w initial star brightness'
-    Assert-Equal (Get-SliderPosition $adjustment.Window $ADJ_ID_DENSITY_SLIDER) 200 '/w initial star density'
-    Assert-Equal (Get-SliderPosition $adjustment.Window $ADJ_ID_SPEED_SLIDER) 50 '/w initial sky speed'
-    Assert-ControlsInsideClient $adjustment.Window @((301..312) + (351..355)) '/w initial layout'
-    if (![Milestone7ConfigNative]::SetWindowPos($adjustment.Window, [IntPtr]::Zero, 0, 0, 760, 620, $SWP_NOMOVE -bor $SWP_NOZORDER)) { Fail 'could not resize /w' }
+    # /w owns a pure renderer plus a floating owned settings window. The shared
+    # settings controls update it live; Save/Revert/close preserve snapshot rules.
+    $adjustment = Start-Window '/w' $RENDERER_WND_CLASS '/w renderer window'
+    $palette = Wait-ForSettingsPalette $adjustment.Process '/w floating settings window'
+    Assert-Equal ([Milestone7ConfigNative]::GetWindow($palette, $GW_OWNER).ToInt64()) $adjustment.Window.ToInt64() '/w palette owner'
+    Assert-Equal (Get-SliderPosition $palette $ADJ_ID_STAR_SLIDER) 120 '/w initial star brightness'
+    Assert-Equal (Get-SliderPosition $palette $ADJ_ID_DENSITY_SLIDER) 1000 '/w initial star density'
+    Assert-Equal (Get-SliderPosition $palette $ADJ_ID_SPEED_SLIDER) 1000 '/w initial sky speed'
+    Assert-ControlsInsideClient $palette @((201..212) + (251..255)) '/w initial floating layout'
+    if (![Milestone7ConfigNative]::SetWindowPos($palette, [IntPtr]::Zero, 0, 0, 600, 420, $SWP_NOMOVE -bor $SWP_NOZORDER)) { Fail 'could not resize /w palette' }
     Start-Sleep -Milliseconds 150
-    Assert-ControlsInsideClient $adjustment.Window @((301..312) + (351..355)) '/w resized layout'
-    Set-SliderPosition $adjustment.Window $ADJ_ID_STAR_SLIDER 88
-    Set-SliderPosition $adjustment.Window $ADJ_ID_DENSITY_SLIDER 50
-    Set-SliderPosition $adjustment.Window $ADJ_ID_SPEED_SLIDER 200
-    Send-Command $adjustment $ADJ_ID_SAVE
+    Assert-ControlsInsideClient $palette @((201..212) + (251..255)) '/w resized floating layout'
+    $paletteWindow = [PSCustomObject]@{ Process = $adjustment.Process; Window = $palette }
+    Set-NormalizedSliderValue $palette $ADJ_ID_STAR_SLIDER 88 0 100
+    Set-NormalizedSliderValue $palette $ADJ_ID_DENSITY_SLIDER 50 50 200
+    Set-NormalizedSliderValue $palette $ADJ_ID_SPEED_SLIDER 0 0 500
+    Send-Command $paletteWindow $ADJ_ID_SAVE
     Start-Sleep -Milliseconds 100
     Assert-Dword 'StarBrightness' 88
     Assert-Dword 'StarDensity' 50
-    Assert-Dword 'SkyFlowSpeed' 200
-    Set-SliderPosition $adjustment.Window $ADJ_ID_STAR_SLIDER 12
-    Set-SliderPosition $adjustment.Window $ADJ_ID_DENSITY_SLIDER 200
-    Set-SliderPosition $adjustment.Window $ADJ_ID_SPEED_SLIDER 50
-    Send-Command $adjustment $ADJ_ID_REVERT
+    Assert-Dword 'SkyFlowSpeed' 0
+    Set-NormalizedSliderValue $palette $ADJ_ID_STAR_SLIDER 12 0 100
+    Set-NormalizedSliderValue $palette $ADJ_ID_DENSITY_SLIDER 200 50 200
+    Set-NormalizedSliderValue $palette $ADJ_ID_SPEED_SLIDER 500 0 500
+    Send-Command $paletteWindow $ADJ_ID_REVERT
     Start-Sleep -Milliseconds 100
-    Assert-Equal (Get-SliderPosition $adjustment.Window $ADJ_ID_STAR_SLIDER) 88 '/w reverted saved star brightness'
-    Assert-Equal (Get-SliderPosition $adjustment.Window $ADJ_ID_DENSITY_SLIDER) 50 '/w reverted saved star density'
-    Assert-Equal (Get-SliderPosition $adjustment.Window $ADJ_ID_SPEED_SLIDER) 200 '/w reverted saved sky speed'
-    Set-SliderPosition $adjustment.Window $ADJ_ID_STAR_SLIDER 77
-    Close-Window $adjustment '/w unsaved close'
+    Assert-Equal (Get-SliderPosition $palette $ADJ_ID_STAR_SLIDER) 880 '/w reverted saved star brightness'
+    Assert-Equal (Get-SliderPosition $palette $ADJ_ID_DENSITY_SLIDER) 0 '/w reverted saved star density'
+    Assert-Equal (Get-SliderPosition $palette $ADJ_ID_SPEED_SLIDER) 0 '/w reverted saved sky speed'
+    Set-NormalizedSliderValue $palette $ADJ_ID_STAR_SLIDER 77 0 100
+    Close-Window $paletteWindow '/w floating-settings close'
     Assert-Dword 'StarBrightness' 88
     Assert-Dword 'StarDensity' 50
-    Assert-Dword 'SkyFlowSpeed' 200
+    Assert-Dword 'SkyFlowSpeed' 0
 
     Write-Host 'Milestone 7 runtime configuration and /w adjustment contract verified.'
 }

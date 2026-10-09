@@ -60,9 +60,6 @@ static HCURSOR g_savedCursor;
 #define FRAME_COOLDOWN_TRIGGER_MS (2ULL * FRAME_INTERVAL_MS)
 #define FRAME_COOLDOWN_DIVISOR 4ULL
 #define FRAME_COOLDOWN_MAX_MS 3000ULL
-#define ADJUST_PANEL_HEIGHT 205
-#define ADJUST_MIN_CLIENT_WIDTH 470
-#define ADJUST_MIN_CLIENT_HEIGHT (ADJUST_PANEL_HEIGHT + 180)
 
 typedef struct StaticSchwarzschildScene {
     GLfloat centerX;
@@ -83,17 +80,64 @@ typedef struct StaticSchwarzschildScene {
     GLfloat exposure;
 } StaticSchwarzschildScene;
 
-// M6 owns one named, fixed Schwarzschild-style composition. Future named
-// scenes must be added deliberately rather than reviving time-driven presets.
-static const StaticSchwarzschildScene STATIC_SCHWARZSCHILD = {
+// M8 keeps every scene inside this reviewed Schwarzschild-style look. Only
+// center, apparent radius, inclination, and roll are sampled at an interval boundary.
+static const StaticSchwarzschildScene M8_SCHWARZSCHILD_BASELINE = {
     0.50f, 0.50f, 0.120f,
     5500.0f, 1.50f, 0.35f, 1.80f, 8.00f,
     0.90f, 0.60f, 2.50f, 2.20f, 1.60f, 7.00f, 5.00f, 1.40f
 };
 
+#define M8_SCENE_DURATION_MS 45000ULL
+#define M8_OFF_CENTER_POSITION_SLOT_COUNT 4u
+
+typedef struct M8SceneRange {
+    GLfloat apparentRadiusMinimum;
+    GLfloat apparentRadiusMaximum;
+    GLfloat inclinationMinimum;
+    GLfloat inclinationMaximum;
+    GLfloat rollMinimum;
+    GLfloat rollMaximum;
+} M8SceneRange;
+
+typedef struct M8ScenePositionRange {
+    GLfloat centerXMinimum;
+    GLfloat centerXMaximum;
+    GLfloat centerYMinimum;
+    GLfloat centerYMaximum;
+} M8ScenePositionRange;
+
+// Inclination is the polar angle of the disk normal: 0 is the north pole and
+// pi/2 is the equator. The maximum stays strictly below pi/2, so a scene never
+// crosses to the opposite hemisphere or flips its visible disk face.
+static const M8SceneRange M8_NORTH_HEMISPHERE_RANGE = {
+    0.100f, 0.135f, 0.050f, 1.480f, 0.00f, 0.78f
+};
+
+// Every approved placement slot excludes the screen center. This keeps the
+// near-polar compositions intentionally off-center while allowing bounded
+// random placement throughout the run.
+static const M8ScenePositionRange M8_OFF_CENTER_POSITION_SLOTS[M8_OFF_CENTER_POSITION_SLOT_COUNT] = {
+    { 0.30f, 0.42f, 0.33f, 0.47f },
+    { 0.58f, 0.70f, 0.33f, 0.47f },
+    { 0.30f, 0.42f, 0.53f, 0.67f },
+    { 0.58f, 0.70f, 0.53f, 0.67f }
+};
+
+typedef struct ActiveScene {
+    // Values are committed together at a scene boundary and are immutable
+    // until endTick. The next render sees either the old or the new snapshot.
+    StaticSchwarzschildScene scene;
+    GLfloat skySeed;
+    GLfloat skyFlowDirectionX;
+    GLfloat skyFlowDirectionY;
+    GLfloat starDensityMultiplier;
+    ULONGLONG startTick;
+    ULONGLONG endTick;
+} ActiveScene;
+
 typedef struct SceneState {
-    // Immutable snapshot passed from the host to one rendered frame. M6 owns
-    // the complete static scene layout and look before GLSL builds local rays.
+    // Immutable snapshot passed from the host to one rendered frame.
     GLfloat elapsedSeconds;
     GLfloat resolutionX;
     GLfloat resolutionY;
@@ -101,9 +145,10 @@ typedef struct SceneState {
     GLfloat diskOpacity;
     GLfloat doppler;
     GLfloat skySeed;
+    GLfloat skyFlowDirectionX;
+    GLfloat skyFlowDirectionY;
     GLfloat starDensity;
     GLfloat skyFlowSpeed;
-    GLfloat viewportOriginY;
     StaticSchwarzschildScene scene;
 } SceneState;
 
@@ -111,21 +156,26 @@ static GLsync g_frameFence;
 static ULONGLONG g_frameSubmitTick;
 static ULONGLONG g_nextFrameEligibleTick;
 static int g_frameSyncReady;
-static GLfloat g_skySeed;
+static DWORD g_sceneRandomState;
+static ActiveScene g_activeScene;
 // Set only for the automated M6 OpenGL smoke. Production runs ignore this
 // entirely unless the test process explicitly supplies a named event.
 static HANDLE g_shaderSmokeEvent;
 
 // ============================================================ config ==
 // Config stored in registry under HKCU\Software\BlackHoleScreensaver.
-// Schema v2 retains the three M4 values and adds only the two safe sky controls.
+// Schema v3 retains the M7 fields and expands only SkyFlowSpeed to 0..500%.
 #define REG_KEY "Software\\BlackHoleScreensaver"
 #define REG_VALUE_CONFIG_SCHEMA_VERSION "ConfigSchemaVersion"
-#define CONFIG_SCHEMA_VERSION 2u
+#define CONFIG_SCHEMA_VERSION 3u
 #define CONFIG_VALUE_MIN 0
 #define CONFIG_VALUE_MAX 100
-#define CONFIG_V2_VALUE_MIN 50
-#define CONFIG_V2_VALUE_MAX 200
+#define CONFIG_STAR_DENSITY_MIN 50
+#define CONFIG_STAR_DENSITY_MAX 200
+#define CONFIG_SKY_FLOW_SPEED_V2_MIN 50
+#define CONFIG_SKY_FLOW_SPEED_V2_MAX 200
+#define CONFIG_SKY_FLOW_SPEED_MIN 0
+#define CONFIG_SKY_FLOW_SPEED_MAX 500
 #define CONFIG_DEFAULT_STAR_BRIGHTNESS 30
 #define CONFIG_DEFAULT_DISK_OPACITY 90
 #define CONFIG_DEFAULT_DOPPLER 60
@@ -153,6 +203,8 @@ static int cfg_starDensity = CONFIG_DEFAULT_STAR_DENSITY;
 static int cfg_skyFlowSpeed = CONFIG_DEFAULT_SKY_FLOW_SPEED;
 static ConfigValues g_adjustmentSnapshot;
 static int g_adjustmentDirty = 0;
+static HWND g_settingsWindow;
+static int g_creatingAdjustmentSettings;
 
 // ============================================================ shader source ==
 // Canonical GLSL is generated into a C string include at build time. The
@@ -231,8 +283,8 @@ static PFNGLGETATTRIBLOCATIONPROC   p_glGetAttribLocation;
 
 static GLuint shaderProgram;
 static GLint uTime = -1, uResolution = -1, uStarGain = -1, uDiskOpacity = -1;
-static GLint uDoppler = -1, uSkySeed = -1, uStarDensity = -1, uSkyFlowSpeed = -1;
-static GLint uViewportOriginY = -1;
+static GLint uDoppler = -1, uSkySeed = -1, uSkyFlowDirection = -1;
+static GLint uStarDensity = -1, uSkyFlowSpeed = -1;
 static GLint uSceneCenter = -1, uApparentRadius = -1, uDiskLookA = -1;
 static GLint uDiskLookB = -1, uDiskLookC = -1, uSceneExposure = -1;
 static GLuint vao;
@@ -306,16 +358,30 @@ static GLuint compileShader(GLenum type, const char* src) {
     return s;
 }
 
-static GLfloat makeSceneSeed(void) {
+static DWORD makeSceneRandomState(void) {
     LARGE_INTEGER counter;
     DWORD seed;
     counter.QuadPart = 0;
     QueryPerformanceCounter(&counter);
     seed = (DWORD)counter.LowPart ^ (DWORD)counter.HighPart ^ GetCurrentProcessId() ^ GetTickCount();
-    seed ^= seed << 13;
-    seed ^= seed >> 17;
-    seed ^= seed << 5;
-    return (GLfloat)(seed & 0x00ffffffu) * (1.0f / 16777216.0f);
+    return seed ? seed : 0x6d2b79f5u;
+}
+
+static DWORD nextSceneRandomValue(void) {
+    DWORD value = g_sceneRandomState;
+    value ^= value << 13;
+    value ^= value >> 17;
+    value ^= value << 5;
+    g_sceneRandomState = value ? value : 0x6d2b79f5u;
+    return g_sceneRandomState;
+}
+
+static GLfloat sceneRandomUnit(void) {
+    return (GLfloat)(nextSceneRandomValue() & 0x00ffffffu) * (1.0f / 16777216.0f);
+}
+
+static GLfloat sceneRandomRange(GLfloat minimum, GLfloat maximum) {
+    return minimum + (maximum - minimum) * sceneRandomUnit();
 }
 
 static void signalShaderSmokeReady(void) {
@@ -353,9 +419,9 @@ static int initShader(void) {
     uDiskOpacity = glGetUniformLocation(shaderProgram, "uDiskOpacity");
     uDoppler = glGetUniformLocation(shaderProgram, "uDoppler");
     uSkySeed = glGetUniformLocation(shaderProgram, "uSkySeed");
+    uSkyFlowDirection = glGetUniformLocation(shaderProgram, "uSkyFlowDirection");
     uStarDensity = glGetUniformLocation(shaderProgram, "uStarDensity");
     uSkyFlowSpeed = glGetUniformLocation(shaderProgram, "uSkyFlowSpeed");
-    uViewportOriginY = glGetUniformLocation(shaderProgram, "uViewportOriginY");
     uSceneCenter = glGetUniformLocation(shaderProgram, "uSceneCenter");
     uApparentRadius = glGetUniformLocation(shaderProgram, "uApparentRadius");
     uDiskLookA = glGetUniformLocation(shaderProgram, "uDiskLookA");
@@ -383,16 +449,20 @@ static int configValueIsValid(int value) {
     return value >= CONFIG_VALUE_MIN && value <= CONFIG_VALUE_MAX;
 }
 
-static int configV2ValueIsValid(int value) {
-    return value >= CONFIG_V2_VALUE_MIN && value <= CONFIG_V2_VALUE_MAX;
+static int configStarDensityIsValid(int value) {
+    return value >= CONFIG_STAR_DENSITY_MIN && value <= CONFIG_STAR_DENSITY_MAX;
+}
+
+static int configSkyFlowSpeedIsValid(int value) {
+    return value >= CONFIG_SKY_FLOW_SPEED_MIN && value <= CONFIG_SKY_FLOW_SPEED_MAX;
 }
 
 static int configIsValid(const ConfigValues* config) {
     return configValueIsValid(config->starBrightness) &&
         configValueIsValid(config->diskOpacity) &&
         configValueIsValid(config->doppler) &&
-        configV2ValueIsValid(config->starDensity) &&
-        configV2ValueIsValid(config->skyFlowSpeed);
+        configStarDensityIsValid(config->starDensity) &&
+        configSkyFlowSpeedIsValid(config->skyFlowSpeed);
 }
 
 static void applyConfig(const ConfigValues* config) {
@@ -441,19 +511,25 @@ static void loadConfig(void) {
         return;
     }
     schemaStatus = readRegistryDword(key, REG_VALUE_CONFIG_SCHEMA_VERSION, &schemaVersion);
-    // Absent marker and v1 deliberately ignore v2 values: an interrupted v2
-    // save uses marker 0 and therefore falls back to all safe defaults.
+    // Absent marker and v1 deliberately ignore newer fields. Marker 0 is the
+    // interrupted-save sentinel and therefore falls back to all safe defaults.
     if (schemaStatus == CONFIG_REGISTRY_VALUE_MISSING ||
         (schemaStatus == CONFIG_REGISTRY_VALUE_VALID && schemaVersion == 1u)) {
         config.starBrightness = readValidatedConfigValue(key, "StarBrightness", config.starBrightness, CONFIG_VALUE_MIN, CONFIG_VALUE_MAX);
         config.diskOpacity = readValidatedConfigValue(key, "DiskOpacity", config.diskOpacity, CONFIG_VALUE_MIN, CONFIG_VALUE_MAX);
         config.doppler = readValidatedConfigValue(key, "Doppler", config.doppler, CONFIG_VALUE_MIN, CONFIG_VALUE_MAX);
+    } else if (schemaStatus == CONFIG_REGISTRY_VALUE_VALID && schemaVersion == 2u) {
+        config.starBrightness = readValidatedConfigValue(key, "StarBrightness", config.starBrightness, CONFIG_VALUE_MIN, CONFIG_VALUE_MAX);
+        config.diskOpacity = readValidatedConfigValue(key, "DiskOpacity", config.diskOpacity, CONFIG_VALUE_MIN, CONFIG_VALUE_MAX);
+        config.doppler = readValidatedConfigValue(key, "Doppler", config.doppler, CONFIG_VALUE_MIN, CONFIG_VALUE_MAX);
+        config.starDensity = readValidatedConfigValue(key, "StarDensity", config.starDensity, CONFIG_STAR_DENSITY_MIN, CONFIG_STAR_DENSITY_MAX);
+        config.skyFlowSpeed = readValidatedConfigValue(key, "SkyFlowSpeed", config.skyFlowSpeed, CONFIG_SKY_FLOW_SPEED_V2_MIN, CONFIG_SKY_FLOW_SPEED_V2_MAX);
     } else if (schemaStatus == CONFIG_REGISTRY_VALUE_VALID && schemaVersion == CONFIG_SCHEMA_VERSION) {
         config.starBrightness = readValidatedConfigValue(key, "StarBrightness", config.starBrightness, CONFIG_VALUE_MIN, CONFIG_VALUE_MAX);
         config.diskOpacity = readValidatedConfigValue(key, "DiskOpacity", config.diskOpacity, CONFIG_VALUE_MIN, CONFIG_VALUE_MAX);
         config.doppler = readValidatedConfigValue(key, "Doppler", config.doppler, CONFIG_VALUE_MIN, CONFIG_VALUE_MAX);
-        config.starDensity = readValidatedConfigValue(key, "StarDensity", config.starDensity, CONFIG_V2_VALUE_MIN, CONFIG_V2_VALUE_MAX);
-        config.skyFlowSpeed = readValidatedConfigValue(key, "SkyFlowSpeed", config.skyFlowSpeed, CONFIG_V2_VALUE_MIN, CONFIG_V2_VALUE_MAX);
+        config.starDensity = readValidatedConfigValue(key, "StarDensity", config.starDensity, CONFIG_STAR_DENSITY_MIN, CONFIG_STAR_DENSITY_MAX);
+        config.skyFlowSpeed = readValidatedConfigValue(key, "SkyFlowSpeed", config.skyFlowSpeed, CONFIG_SKY_FLOW_SPEED_MIN, CONFIG_SKY_FLOW_SPEED_MAX);
     }
     RegCloseKey(key);
     applyConfig(&config);
@@ -466,7 +542,7 @@ static int saveConfig(const ConfigValues* config) {
     if (!configIsValid(config)) return 0;
     if (RegCreateKeyExA(HKEY_CURRENT_USER, REG_KEY, 0, NULL, 0, KEY_SET_VALUE, NULL, &key, NULL) != ERROR_SUCCESS) return 0;
 
-    // Invalidate first. All writes short-circuit; schema 2 is published only
+    // Invalidate first. All writes short-circuit; schema 3 is published only
     // once every setting has been stored, so a failed save cannot look valid.
     ok = writeRegistryDword(key, REG_VALUE_CONFIG_SCHEMA_VERSION, 0);
     if (ok) ok = writeRegistryDword(key, "StarBrightness", (DWORD)config->starBrightness);
@@ -479,7 +555,7 @@ static int saveConfig(const ConfigValues* config) {
     return ok;
 }
 
-// ============================================================ controls ==
+// ============================================================ settings window ==
 #define CFG_ID_STAR_SLIDER     201
 #define CFG_ID_DISK_SLIDER     202
 #define CFG_ID_DOPPLER_SLIDER  203
@@ -492,26 +568,24 @@ static int saveConfig(const ConfigValues* config) {
 #define CFG_ID_SPEED_LABEL     210
 #define CFG_ID_OK              211
 #define CFG_ID_CANCEL          212
-#define ADJ_ID_STAR_SLIDER     301
-#define ADJ_ID_DISK_SLIDER     302
-#define ADJ_ID_DOPPLER_SLIDER  303
-#define ADJ_ID_DENSITY_SLIDER  304
-#define ADJ_ID_SPEED_SLIDER    305
-#define ADJ_ID_STAR_LABEL      306
-#define ADJ_ID_DISK_LABEL      307
-#define ADJ_ID_DOPPLER_LABEL   308
-#define ADJ_ID_DENSITY_LABEL   309
-#define ADJ_ID_SPEED_LABEL     310
-#define ADJ_ID_SAVE            311
-#define ADJ_ID_REVERT          312
-#define CFG_WND_CLASS "BlackHoleConfig"
-#define CFG_BASE_DPI 96
-#define CFG_CLIENT_WIDTH 440
-#define CFG_CLIENT_HEIGHT 235
+#define SETTINGS_WND_CLASS "BlackHoleSettings"
+#define SETTINGS_BASE_DPI 96
+#define SETTINGS_CLIENT_WIDTH 460
+#define SETTINGS_CLIENT_HEIGHT 235
+#define SETTINGS_WINDOW_STYLE (WS_CAPTION | WS_SYSMENU | WS_THICKFRAME)
+#define SETTINGS_SLIDER_UNITS 1000
 
-static UINT configSystemDpi(void) {
+typedef enum SettingsWindowMode {
+    SETTINGS_WINDOW_CONFIG,
+    SETTINGS_WINDOW_ADJUSTMENT
+} SettingsWindowMode;
+
+// Exactly one settings window exists per process. Windows can send
+// WM_GETMINMAXINFO before CreateWindowExA returns, so creation has a separate
+// explicit mode until the /w palette HWND can be stored.
+static UINT settingsSystemDpi(void) {
     HDC screen = GetDC(NULL);
-    UINT dpi = CFG_BASE_DPI;
+    UINT dpi = SETTINGS_BASE_DPI;
     if (screen) {
         int systemDpi = GetDeviceCaps(screen, LOGPIXELSX);
         ReleaseDC(NULL, screen);
@@ -520,17 +594,124 @@ static UINT configSystemDpi(void) {
     return dpi;
 }
 
-static int cfgScale(int logicalPixels, UINT dpi) {
-    return MulDiv(logicalPixels, (int)dpi, CFG_BASE_DPI);
+static int settingsScale(int logicalPixels, UINT dpi) {
+    return MulDiv(logicalPixels, (int)dpi, SETTINGS_BASE_DPI);
 }
 
-static void setControlText(HWND hwnd, int controlId, int value, int percent) {
+static SettingsWindowMode settingsWindowMode(HWND hwnd) {
+    return hwnd == g_settingsWindow || g_creatingAdjustmentSettings ?
+        SETTINGS_WINDOW_ADJUSTMENT : SETTINGS_WINDOW_CONFIG;
+}
+
+static int configValuesEqual(const ConfigValues* left, const ConfigValues* right) {
+    return left->starBrightness == right->starBrightness &&
+        left->diskOpacity == right->diskOpacity &&
+        left->doppler == right->doppler &&
+        left->starDensity == right->starDensity &&
+        left->skyFlowSpeed == right->skyFlowSpeed;
+}
+
+static int settingMinimum(int index) {
+    if (index == 3) return CONFIG_STAR_DENSITY_MIN;
+    return CONFIG_VALUE_MIN;
+}
+
+static int settingMaximum(int index) {
+    if (index < 3) return CONFIG_VALUE_MAX;
+    if (index == 3) return CONFIG_STAR_DENSITY_MAX;
+    return CONFIG_SKY_FLOW_SPEED_MAX;
+}
+
+static int settingSliderPosition(int index, int value) {
+    int minimum = settingMinimum(index);
+    int maximum = settingMaximum(index);
+    if (value < minimum) value = minimum;
+    if (value > maximum) value = maximum;
+    return (value - minimum) * SETTINGS_SLIDER_UNITS / (maximum - minimum);
+}
+
+static int settingValueFromSlider(int index, int position) {
+    int minimum = settingMinimum(index);
+    int maximum = settingMaximum(index);
+    if (position < 0) position = 0;
+    if (position > SETTINGS_SLIDER_UNITS) position = SETTINGS_SLIDER_UNITS;
+    return minimum + (position * (maximum - minimum) + SETTINGS_SLIDER_UNITS / 2) / SETTINGS_SLIDER_UNITS;
+}
+
+static void setControlText(HWND hwnd, int controlId, int position) {
     char buffer[16];
-    wsprintfA(buffer, percent ? "%d%%" : "%d", value);
+    sprintf(buffer, "%.3f", (double)position / SETTINGS_SLIDER_UNITS);
     SetDlgItemTextA(hwnd, controlId, buffer);
 }
 
-static void createSettingsControls(HWND hwnd, int sliderBase, int labelBase, int saveId, int revertId, const ConfigValues* config) {
+static ConfigValues settingsControlsConfig(HWND hwnd) {
+    ConfigValues config;
+    config.starBrightness = settingValueFromSlider(0, (int)SendDlgItemMessage(hwnd, CFG_ID_STAR_SLIDER, TBM_GETPOS, 0, 0));
+    config.diskOpacity = settingValueFromSlider(1, (int)SendDlgItemMessage(hwnd, CFG_ID_DISK_SLIDER, TBM_GETPOS, 0, 0));
+    config.doppler = settingValueFromSlider(2, (int)SendDlgItemMessage(hwnd, CFG_ID_DOPPLER_SLIDER, TBM_GETPOS, 0, 0));
+    config.starDensity = settingValueFromSlider(3, (int)SendDlgItemMessage(hwnd, CFG_ID_DENSITY_SLIDER, TBM_GETPOS, 0, 0));
+    config.skyFlowSpeed = settingValueFromSlider(4, (int)SendDlgItemMessage(hwnd, CFG_ID_SPEED_SLIDER, TBM_GETPOS, 0, 0));
+    return config;
+}
+
+static void updateSettingsLabels(HWND hwnd) {
+    int index;
+    for (index = 0; index < 5; ++index) {
+        int position = (int)SendDlgItemMessage(hwnd, CFG_ID_STAR_SLIDER + index, TBM_GETPOS, 0, 0);
+        setControlText(hwnd, CFG_ID_STAR_LABEL + index, position);
+    }
+}
+
+static void setSettingsControls(HWND hwnd, const ConfigValues* config) {
+    int values[5] = {
+        config->starBrightness, config->diskOpacity, config->doppler, config->starDensity, config->skyFlowSpeed
+    };
+    int index;
+    for (index = 0; index < 5; ++index) {
+        int position = settingSliderPosition(index, values[index]);
+        SendDlgItemMessage(hwnd, CFG_ID_STAR_SLIDER + index, TBM_SETPOS, TRUE, position);
+        setControlText(hwnd, CFG_ID_STAR_LABEL + index, position);
+    }
+}
+
+static void setSettingsMinimumTrackSize(SettingsWindowMode mode, MINMAXINFO* info) {
+    UINT dpi = settingsSystemDpi();
+    RECT outer = { 0, 0, settingsScale(SETTINGS_CLIENT_WIDTH, dpi), settingsScale(SETTINGS_CLIENT_HEIGHT, dpi) };
+    DWORD exStyle = WS_EX_DLGMODALFRAME | (mode == SETTINGS_WINDOW_ADJUSTMENT ? WS_EX_TOOLWINDOW : 0);
+    AdjustWindowRectEx(&outer, SETTINGS_WINDOW_STYLE, FALSE, exStyle);
+    info->ptMinTrackSize.x = outer.right - outer.left;
+    info->ptMinTrackSize.y = outer.bottom - outer.top;
+}
+
+static void layoutSettingsControls(HWND hwnd, int clientWidth, int clientHeight) {
+    UINT dpi = settingsSystemDpi();
+    int margin = settingsScale(18, dpi);
+    int rowHeight = settingsScale(31, dpi);
+    int labelWidth = settingsScale(122, dpi);
+    int valueWidth = settingsScale(58, dpi);
+    int gap = settingsScale(10, dpi);
+    int sliderLeft = margin + labelWidth + gap;
+    int sliderWidth = clientWidth - sliderLeft - valueWidth - margin - gap;
+    int trackHeight = settingsScale(27, dpi);
+    int textHeight = settingsScale(20, dpi);
+    int buttonWidth = settingsScale(82, dpi);
+    int buttonHeight = settingsScale(28, dpi);
+    int index;
+
+    if (sliderWidth < settingsScale(100, dpi)) sliderWidth = settingsScale(100, dpi);
+    for (index = 0; index < 5; ++index) {
+        int y = margin + index * rowHeight;
+        MoveWindow(GetDlgItem(hwnd, CFG_ID_STAR_SLIDER + index), sliderLeft, y - settingsScale(4, dpi), sliderWidth, trackHeight, TRUE);
+        MoveWindow(GetDlgItem(hwnd, CFG_ID_STAR_LABEL + index), sliderLeft + sliderWidth + gap, y, valueWidth, textHeight, TRUE);
+        MoveWindow(GetDlgItem(hwnd, CFG_ID_STAR_SLIDER + 50 + index), margin, y, labelWidth, textHeight, TRUE);
+    }
+    MoveWindow(GetDlgItem(hwnd, CFG_ID_OK), clientWidth - margin - buttonWidth * 2 - gap,
+        clientHeight - margin - buttonHeight, buttonWidth, buttonHeight, TRUE);
+    MoveWindow(GetDlgItem(hwnd, CFG_ID_CANCEL), clientWidth - margin - buttonWidth,
+        clientHeight - margin - buttonHeight, buttonWidth, buttonHeight, TRUE);
+}
+
+static void createSettingsControls(HWND hwnd, SettingsWindowMode mode, const ConfigValues* config) {
     static const char* names[5] = {
         "Star Brightness:", "Disk Opacity:", "Doppler Effect:", "Star Density:", "Sky Flow Speed:"
     };
@@ -541,143 +722,192 @@ static void createSettingsControls(HWND hwnd, int sliderBase, int labelBase, int
     int index;
 
     for (index = 0; index < 5; ++index) {
-        HWND control;
-        control = CreateWindowA("STATIC", names[index], WS_CHILD | WS_VISIBLE,
-            20, 10 + index * 30, 110, 20, hwnd, (HMENU)(INT_PTR)(sliderBase + 50 + index), hInst, NULL);
+        HWND control = CreateWindowA("STATIC", names[index], WS_CHILD | WS_VISIBLE,
+            0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)(CFG_ID_STAR_SLIDER + 50 + index), hInst, NULL);
         SendMessage(control, WM_SETFONT, (WPARAM)font, TRUE);
-        control = CreateWindowA(TRACKBAR_CLASSA, "", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS | TBS_TOOLTIPS,
-            140, 6 + index * 30, 200, 26, hwnd, (HMENU)(INT_PTR)(sliderBase + index), hInst, NULL);
-        SendMessage(control, TBM_SETRANGE, TRUE, MAKELONG(index < 3 ? CONFIG_VALUE_MIN : CONFIG_V2_VALUE_MIN,
-            index < 3 ? CONFIG_VALUE_MAX : CONFIG_V2_VALUE_MAX));
-        SendMessage(control, TBM_SETPOS, TRUE, values[index]);
+        // The bar stores 0..1000 implementation units for a smooth normalized
+        // 0.000..1.000 value. Do not expose that raw position through the
+        // common-control tooltip; the adjacent label is the canonical value.
+        control = CreateWindowA(TRACKBAR_CLASSA, "", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS,
+            0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)(CFG_ID_STAR_SLIDER + index), hInst, NULL);
+        SendMessage(control, TBM_SETRANGE, TRUE, MAKELONG(0, SETTINGS_SLIDER_UNITS));
+        SendMessage(control, TBM_SETPOS, TRUE, settingSliderPosition(index, values[index]));
         SendMessage(control, WM_SETFONT, (WPARAM)font, TRUE);
         control = CreateWindowA("STATIC", "", WS_CHILD | WS_VISIBLE | SS_CENTER,
-            350, 10 + index * 30, 55, 20, hwnd, (HMENU)(INT_PTR)(labelBase + index), hInst, NULL);
+            0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)(CFG_ID_STAR_LABEL + index), hInst, NULL);
         SendMessage(control, WM_SETFONT, (WPARAM)font, TRUE);
-        setControlText(hwnd, labelBase + index, values[index], index >= 3);
+        setControlText(hwnd, CFG_ID_STAR_LABEL + index, settingSliderPosition(index, values[index]));
     }
     {
-        HWND control = CreateWindowA("BUTTON", saveId == ADJ_ID_SAVE ? "Save" : "OK",
-            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 240, 165, 80, 28,
-            hwnd, (HMENU)(INT_PTR)saveId, hInst, NULL);
+        HWND control = CreateWindowA("BUTTON", mode == SETTINGS_WINDOW_ADJUSTMENT ? "Save" : "OK",
+            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)CFG_ID_OK, hInst, NULL);
         SendMessage(control, WM_SETFONT, (WPARAM)font, TRUE);
-        control = CreateWindowA("BUTTON", revertId == ADJ_ID_REVERT ? "Revert" : "Cancel",
-            WS_CHILD | WS_VISIBLE, 330, 165, 80, 28,
-            hwnd, (HMENU)(INT_PTR)revertId, hInst, NULL);
+        control = CreateWindowA("BUTTON", mode == SETTINGS_WINDOW_ADJUSTMENT ? "Revert" : "Cancel",
+            WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)CFG_ID_CANCEL, hInst, NULL);
         SendMessage(control, WM_SETFONT, (WPARAM)font, TRUE);
     }
 }
 
-static ConfigValues controlsConfig(HWND hwnd, int sliderBase) {
-    ConfigValues config;
-    config.starBrightness = (int)SendDlgItemMessage(hwnd, sliderBase, TBM_GETPOS, 0, 0);
-    config.diskOpacity = (int)SendDlgItemMessage(hwnd, sliderBase + 1, TBM_GETPOS, 0, 0);
-    config.doppler = (int)SendDlgItemMessage(hwnd, sliderBase + 2, TBM_GETPOS, 0, 0);
-    config.starDensity = (int)SendDlgItemMessage(hwnd, sliderBase + 3, TBM_GETPOS, 0, 0);
-    config.skyFlowSpeed = (int)SendDlgItemMessage(hwnd, sliderBase + 4, TBM_GETPOS, 0, 0);
-    return config;
-}
+static void registerSettingsWindowClass(HINSTANCE instance);
 
-static void setControlsConfig(HWND hwnd, int sliderBase, int labelBase, const ConfigValues* config) {
-    int values[5] = {
-        config->starBrightness, config->diskOpacity, config->doppler, config->starDensity, config->skyFlowSpeed
-    };
-    int index;
-    for (index = 0; index < 5; ++index) {
-        SendDlgItemMessage(hwnd, sliderBase + index, TBM_SETPOS, TRUE, values[index]);
-        setControlText(hwnd, labelBase + index, values[index], index >= 3);
+static void placeSettingsWindow(HWND owner, int width, int height, int* x, int* y) {
+    MONITORINFO monitorInfo = { sizeof(monitorInfo) };
+    HMONITOR monitor;
+    RECT work;
+    if (owner) {
+        monitor = MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST);
+    } else {
+        POINT cursor;
+        GetCursorPos(&cursor);
+        monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+    }
+    if (!GetMonitorInfoA(monitor, &monitorInfo)) {
+        work.left = 0;
+        work.top = 0;
+        work.right = GetSystemMetrics(SM_CXSCREEN);
+        work.bottom = GetSystemMetrics(SM_CYSCREEN);
+    } else work = monitorInfo.rcWork;
+
+    if (owner) {
+        RECT ownerRect;
+        GetWindowRect(owner, &ownerRect);
+        *x = ownerRect.right + 10;
+        *y = ownerRect.top;
+        if (*x + width > work.right) *x = ownerRect.left - width - 10;
+        if (*x < work.left) *x = work.left + (work.right - work.left - width) / 2;
+        if (*y + height > work.bottom) *y = work.bottom - height;
+        if (*y < work.top) *y = work.top;
+    } else {
+        *x = work.left + (work.right - work.left - width) / 2;
+        *y = work.top + (work.bottom - work.top - height) / 2;
     }
 }
 
-static void updateLabels(HWND hwnd, int sliderBase, int labelBase) {
-    int index;
-    for (index = 0; index < 5; ++index) {
-        int value = (int)SendDlgItemMessage(hwnd, sliderBase + index, TBM_GETPOS, 0, 0);
-        setControlText(hwnd, labelBase + index, value, index >= 3);
-    }
+static HWND createSettingsWindow(HWND owner, SettingsWindowMode mode) {
+    UINT dpi = settingsSystemDpi();
+    RECT outer = { 0, 0, settingsScale(SETTINGS_CLIENT_WIDTH, dpi), settingsScale(SETTINGS_CLIENT_HEIGHT, dpi) };
+    DWORD style = SETTINGS_WINDOW_STYLE;
+    DWORD exStyle = WS_EX_DLGMODALFRAME | (owner ? WS_EX_TOOLWINDOW : 0);
+    HWND hwnd;
+    int x;
+    int y;
+
+    registerSettingsWindowClass(hInst);
+    AdjustWindowRectEx(&outer, style, FALSE, exStyle);
+    placeSettingsWindow(owner, outer.right - outer.left, outer.bottom - outer.top, &x, &y);
+    if (mode == SETTINGS_WINDOW_ADJUSTMENT) g_creatingAdjustmentSettings = 1;
+    hwnd = CreateWindowExA(exStyle, SETTINGS_WND_CLASS,
+        mode == SETTINGS_WINDOW_ADJUSTMENT ? "Black Hole Live Settings" : "BlackHole Screensaver Settings",
+        style, x, y, outer.right - outer.left, outer.bottom - outer.top,
+        owner, NULL, hInst, NULL);
+    if (mode == SETTINGS_WINDOW_ADJUSTMENT) g_creatingAdjustmentSettings = 0;
+    return hwnd;
 }
 
-static void layoutAdjustmentControls(HWND hwnd, int clientWidth, int clientHeight) {
-    int panelTop = clientHeight - ADJUST_PANEL_HEIGHT;
-    int sliderWidth = clientWidth - 240;
-    int index;
-    if (sliderWidth < 100) sliderWidth = 100;
-    for (index = 0; index < 5; ++index) {
-        int y = panelTop + 10 + index * 30;
-        MoveWindow(GetDlgItem(hwnd, ADJ_ID_STAR_SLIDER + index), 140, y, sliderWidth, 26, TRUE);
-        MoveWindow(GetDlgItem(hwnd, ADJ_ID_STAR_LABEL + index), clientWidth - 80, y + 4, 55, 20, TRUE);
-        MoveWindow(GetDlgItem(hwnd, ADJ_ID_STAR_SLIDER + 50 + index), 20, y + 4, 110, 20, TRUE);
-    }
-    MoveWindow(GetDlgItem(hwnd, ADJ_ID_SAVE), clientWidth - 200, clientHeight - 32, 80, 25, TRUE);
-    MoveWindow(GetDlgItem(hwnd, ADJ_ID_REVERT), clientWidth - 110, clientHeight - 32, 80, 25, TRUE);
-}
-
-static LRESULT CALLBACK ConfigWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    SettingsWindowMode mode = settingsWindowMode(hwnd);
     switch (msg) {
     case WM_CREATE: {
         ConfigValues config = currentConfig();
-        createSettingsControls(hwnd, CFG_ID_STAR_SLIDER, CFG_ID_STAR_LABEL, CFG_ID_OK, CFG_ID_CANCEL, &config);
+        createSettingsControls(hwnd, mode, &config);
+        { RECT client; GetClientRect(hwnd, &client); layoutSettingsControls(hwnd, client.right, client.bottom); }
         return 0;
     }
+    case WM_GETMINMAXINFO:
+        setSettingsMinimumTrackSize(mode, (MINMAXINFO*)lp);
+        return 0;
+    case WM_SIZE:
+        layoutSettingsControls(hwnd, LOWORD(lp), HIWORD(lp));
+        return 0;
     case WM_HSCROLL:
-        updateLabels(hwnd, CFG_ID_STAR_SLIDER, CFG_ID_STAR_LABEL);
+        updateSettingsLabels(hwnd);
+        if (mode == SETTINGS_WINDOW_ADJUSTMENT) {
+            ConfigValues pending = settingsControlsConfig(hwnd);
+            applyConfig(&pending);
+            g_adjustmentDirty = !configValuesEqual(&pending, &g_adjustmentSnapshot);
+        }
         return 0;
     case WM_COMMAND:
         if (LOWORD(wp) == CFG_ID_OK) {
-            ConfigValues pending = controlsConfig(hwnd, CFG_ID_STAR_SLIDER);
+            ConfigValues pending = settingsControlsConfig(hwnd);
             if (!saveConfig(&pending)) {
                 MessageBoxA(hwnd, "Settings could not be saved.", "BlackHole Screensaver Settings", MB_OK | MB_ICONERROR);
                 return 0;
             }
             applyConfig(&pending);
-            DestroyWindow(hwnd);
+            if (mode == SETTINGS_WINDOW_ADJUSTMENT) {
+                g_adjustmentSnapshot = pending;
+                g_adjustmentDirty = 0;
+            } else DestroyWindow(hwnd);
             return 0;
         }
         if (LOWORD(wp) == CFG_ID_CANCEL) {
-            DestroyWindow(hwnd);
+            if (mode == SETTINGS_WINDOW_ADJUSTMENT) {
+                applyConfig(&g_adjustmentSnapshot);
+                setSettingsControls(hwnd, &g_adjustmentSnapshot);
+                g_adjustmentDirty = 0;
+            } else DestroyWindow(hwnd);
             return 0;
         }
         break;
+    case WM_CLOSE:
+        if (mode == SETTINGS_WINDOW_ADJUSTMENT) {
+            HWND owner = GetWindow(hwnd, GW_OWNER);
+            if (IsWindow(owner)) {
+                PostMessage(owner, WM_CLOSE, 0, 0);
+                return 0;
+            }
+        }
+        DestroyWindow(hwnd);
+        return 0;
     case WM_DESTROY:
-        PostQuitMessage(0);
+        if (mode == SETTINGS_WINDOW_ADJUSTMENT) {
+            if (hwnd == g_settingsWindow) g_settingsWindow = NULL;
+        } else PostQuitMessage(0);
         return 0;
     }
     return DefWindowProc(hwnd, msg, wp, lp);
 }
 
-static void showConfigDialog(HINSTANCE instance) {
+static void registerSettingsWindowClass(HINSTANCE instance) {
     WNDCLASSEXA windowClass = {0};
-    RECT outer;
-    UINT dpi = configSystemDpi();
-    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
-    HWND hwnd;
-    MSG msg;
-
     windowClass.cbSize = sizeof(windowClass);
     windowClass.style = CS_HREDRAW | CS_VREDRAW;
-    windowClass.lpfnWndProc = ConfigWndProc;
+    windowClass.lpfnWndProc = SettingsWndProc;
     windowClass.hInstance = instance;
     windowClass.hCursor = LoadCursor(NULL, IDC_ARROW);
-    windowClass.lpszClassName = CFG_WND_CLASS;
+    windowClass.lpszClassName = SETTINGS_WND_CLASS;
     windowClass.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    RegisterClassExA(&windowClass);
+    if (!RegisterClassExA(&windowClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+        MessageBoxA(NULL, "The settings window could not be registered.", "BlackHole Screensaver Settings", MB_OK | MB_ICONERROR);
+    }
+}
 
-    outer.left = 0;
-    outer.top = 0;
-    outer.right = cfgScale(CFG_CLIENT_WIDTH, dpi);
-    outer.bottom = cfgScale(CFG_CLIENT_HEIGHT, dpi);
-    AdjustWindowRectEx(&outer, style, FALSE, WS_EX_DLGMODALFRAME);
-    hwnd = CreateWindowExA(WS_EX_DLGMODALFRAME, CFG_WND_CLASS, "BlackHole Screensaver Settings", style,
-        (GetSystemMetrics(SM_CXSCREEN) - (outer.right - outer.left)) / 2,
-        (GetSystemMetrics(SM_CYSCREEN) - (outer.bottom - outer.top)) / 2,
-        outer.right - outer.left, outer.bottom - outer.top, NULL, NULL, instance, NULL);
-    if (!hwnd) return;
+static void showConfigDialog(void) {
+    HWND hwnd = createSettingsWindow(NULL, SETTINGS_WINDOW_CONFIG);
+    MSG msg;
+    if (!hwnd) {
+        char message[128];
+        wsprintfA(message, "The settings window could not be created (error %lu).", GetLastError());
+        MessageBoxA(NULL, message, "BlackHole Screensaver Settings", MB_OK | MB_ICONERROR);
+        return;
+    }
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
     while (GetMessage(&msg, NULL, 0, 0) > 0) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
+}
+
+static int showAdjustmentSettings(HWND owner) {
+    g_adjustmentSnapshot = currentConfig();
+    g_adjustmentDirty = 0;
+    g_settingsWindow = createSettingsWindow(owner, SETTINGS_WINDOW_ADJUSTMENT);
+    if (!g_settingsWindow) return 0;
+    ShowWindow(g_settingsWindow, SW_SHOW);
+    UpdateWindow(g_settingsWindow);
+    return 1;
 }
 
 // ============================================================ WGL init ==
@@ -798,19 +1028,51 @@ static int presentPreparedFrame(void) {
     return 1;
 }
 
+static void beginScene(ULONGLONG startTick) {
+    const M8SceneRange* range = &M8_NORTH_HEMISPHERE_RANGE;
+    const M8ScenePositionRange* position;
+    unsigned int positionIndex;
+    GLfloat skyFlowAngle;
+
+    positionIndex = nextSceneRandomValue() % M8_OFF_CENTER_POSITION_SLOT_COUNT;
+    position = &M8_OFF_CENTER_POSITION_SLOTS[positionIndex];
+    g_activeScene.scene = M8_SCHWARZSCHILD_BASELINE;
+    g_activeScene.scene.centerX = sceneRandomRange(position->centerXMinimum, position->centerXMaximum);
+    g_activeScene.scene.centerY = sceneRandomRange(position->centerYMinimum, position->centerYMaximum);
+    g_activeScene.scene.apparentRadius = sceneRandomRange(range->apparentRadiusMinimum, range->apparentRadiusMaximum);
+    g_activeScene.scene.inclination = sceneRandomRange(range->inclinationMinimum, range->inclinationMaximum);
+    g_activeScene.scene.roll = sceneRandomRange(range->rollMinimum, range->rollMaximum);
+    g_activeScene.skySeed = sceneRandomUnit();
+    skyFlowAngle = sceneRandomRange(0.0f, 6.28318530718f);
+    g_activeScene.skyFlowDirectionX = cosf(skyFlowAngle);
+    g_activeScene.skyFlowDirectionY = sinf(skyFlowAngle);
+    g_activeScene.starDensityMultiplier = sceneRandomRange(0.85f, 1.15f);
+    g_activeScene.startTick = startTick;
+    g_activeScene.endTick = startTick + M8_SCENE_DURATION_MS;
+}
+
+static void advanceSceneTo(ULONGLONG now) {
+    // A delayed frame may cross more than one fixed-duration boundary. Advance
+    // through each interval so state never depends on a frame-local remainder.
+    while (now >= g_activeScene.endTick) beginScene(g_activeScene.endTick);
+}
+
 static SceneState makeSceneState(ULONGLONG now) {
     SceneState state;
+    advanceSceneTo(now);
     state.elapsedSeconds = (float)(now - g_tick0) / 1000.0f;
     state.resolutionX = (float)g_W;
     state.resolutionY = (float)g_H;
     state.starGain = (float)cfg_starBrightness / 100.0f;
     state.diskOpacity = (float)cfg_diskOpacity / 100.0f;
     state.doppler = (float)cfg_doppler / 100.0f;
-    state.skySeed = g_skySeed;
+    state.skySeed = g_activeScene.skySeed;
+    state.skyFlowDirectionX = g_activeScene.skyFlowDirectionX;
+    state.skyFlowDirectionY = g_activeScene.skyFlowDirectionY;
     state.starDensity = (float)cfg_starDensity / 100.0f;
+    state.starDensity *= g_activeScene.starDensityMultiplier;
     state.skyFlowSpeed = (float)cfg_skyFlowSpeed / 100.0f;
-    state.viewportOriginY = g_adjustmentMode ? (GLfloat)ADJUST_PANEL_HEIGHT : 0.0f;
-    state.scene = STATIC_SCHWARZSCHILD;
+    state.scene = g_activeScene.scene;
     return state;
 }
 
@@ -821,9 +1083,9 @@ static void uploadSceneState(const SceneState* state) {
     if (uDiskOpacity >= 0) glUniform1f(uDiskOpacity, state->diskOpacity);
     if (uDoppler >= 0) glUniform1f(uDoppler, state->doppler);
     if (uSkySeed >= 0) glUniform1f(uSkySeed, state->skySeed);
+    if (uSkyFlowDirection >= 0) glUniform2f(uSkyFlowDirection, state->skyFlowDirectionX, state->skyFlowDirectionY);
     if (uStarDensity >= 0) glUniform1f(uStarDensity, state->starDensity);
     if (uSkyFlowSpeed >= 0) glUniform1f(uSkyFlowSpeed, state->skyFlowSpeed);
-    if (uViewportOriginY >= 0) glUniform1f(uViewportOriginY, state->viewportOriginY);
     if (uSceneCenter >= 0) glUniform2f(uSceneCenter, state->scene.centerX, state->scene.centerY);
     if (uApparentRadius >= 0) glUniform1f(uApparentRadius, state->scene.apparentRadius);
     if (uDiskLookA >= 0) glUniform4f(uDiskLookA, state->scene.temperature, state->scene.inclination, state->scene.roll, state->scene.innerRadius);
@@ -835,10 +1097,8 @@ static void uploadSceneState(const SceneState* state) {
 static int renderFrame(int present) {
     ULONGLONG now = GetTickCount64();
     const SceneState state = makeSceneState(now);
-    int viewportY = 0;
-    if (g_adjustmentMode) viewportY = ADJUST_PANEL_HEIGHT;
 
-    glViewport(0, viewportY, g_W, g_H);
+    glViewport(0, 0, g_W, g_H);
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glUseProgram(shaderProgram);
@@ -893,29 +1153,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_fullscreen && g_cursorHideCount) { SetCursor(NULL); return TRUE; }
         break;
     case WM_CREATE:
-        if (g_adjustmentMode) {
-            ConfigValues config = currentConfig();
-            RECT client;
-            g_adjustmentSnapshot = config;
-            createSettingsControls(hwnd, ADJ_ID_STAR_SLIDER, ADJ_ID_STAR_LABEL, ADJ_ID_SAVE, ADJ_ID_REVERT, &config);
-            GetClientRect(hwnd, &client);
-            layoutAdjustmentControls(hwnd, client.right, client.bottom);
-        }
         SetTimer(hwnd, 1, FRAME_INTERVAL_MS, NULL);
         g_tick0 = GetTickCount64();
         GetCursorPos(&g_mousePrev);
         g_mouseMoved = 0;
         return 0;
-    case WM_GETMINMAXINFO:
-        if (g_adjustmentMode) {
-            MINMAXINFO* info = (MINMAXINFO*)lp;
-            RECT outer = { 0, 0, ADJUST_MIN_CLIENT_WIDTH, ADJUST_MIN_CLIENT_HEIGHT };
-            AdjustWindowRect(&outer, WS_OVERLAPPEDWINDOW, FALSE);
-            info->ptMinTrackSize.x = outer.right - outer.left;
-            info->ptMinTrackSize.y = outer.bottom - outer.top;
-            return 0;
-        }
-        break;
     case WM_TIMER:
         if (!g_preview && !g_adjustmentMode && shouldExit()) { PostQuitMessage(0); return 0; }
         renderVisibleFrame();
@@ -943,52 +1185,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_RBUTTONDOWN:
         if (!g_preview && !g_adjustmentMode) PostQuitMessage(0);
         return 0;
-    case WM_HSCROLL:
-        if (g_adjustmentMode) {
-            ConfigValues config = controlsConfig(hwnd, ADJ_ID_STAR_SLIDER);
-            applyConfig(&config);
-            updateLabels(hwnd, ADJ_ID_STAR_SLIDER, ADJ_ID_STAR_LABEL);
-            g_adjustmentDirty = 1;
-        }
-        return 0;
-    case WM_COMMAND:
-        if (g_adjustmentMode && LOWORD(wp) == ADJ_ID_SAVE) {
-            ConfigValues config = controlsConfig(hwnd, ADJ_ID_STAR_SLIDER);
-            if (!saveConfig(&config)) {
-                MessageBoxA(hwnd, "Settings could not be saved.", "BlackHole Screensaver Settings", MB_OK | MB_ICONERROR);
-                return 0;
-            }
-            applyConfig(&config);
-            g_adjustmentSnapshot = config;
-            g_adjustmentDirty = 0;
-            return 0;
-        }
-        if (g_adjustmentMode && LOWORD(wp) == ADJ_ID_REVERT) {
-            applyConfig(&g_adjustmentSnapshot);
-            setControlsConfig(hwnd, ADJ_ID_STAR_SLIDER, ADJ_ID_STAR_LABEL, &g_adjustmentSnapshot);
-            g_adjustmentDirty = 0;
-            return 0;
-        }
-        break;
     case WM_SIZE:
-        if (g_adjustmentMode) {
-            int clientWidth = LOWORD(lp);
-            int clientHeight = HIWORD(lp);
-            g_W = clientWidth;
-            g_H = clientHeight - ADJUST_PANEL_HEIGHT;
-            if (g_H < 1) g_H = 1;
-            layoutAdjustmentControls(hwnd, clientWidth, clientHeight);
-        } else {
-            g_W = LOWORD(lp);
-            g_H = HIWORD(lp);
-        }
+        g_W = LOWORD(lp);
+        g_H = HIWORD(lp);
+        if (g_H < 1) g_H = 1;
         return 0;
     case WM_CLOSE:
         if (g_adjustmentMode && g_adjustmentDirty) applyConfig(&g_adjustmentSnapshot);
+        if (g_settingsWindow && IsWindow(g_settingsWindow)) DestroyWindow(g_settingsWindow);
         DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
         KillTimer(hwnd, 1);
+        if (g_settingsWindow && IsWindow(g_settingsWindow)) DestroyWindow(g_settingsWindow);
         PostQuitMessage(0);
         return 0;
     }
@@ -1041,7 +1250,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmdLine, int show
     while (*commandLine == ' ' || *commandLine == '\t') ++commandLine;
 
     if (commandLine[0] == 0) {
-        showConfigDialog(hInstance);
+        showConfigDialog();
         return 0;
     }
     if (_strnicmp(commandLine, "/s", 2) == 0 && commandHasNoArguments(commandLine + 2)) {
@@ -1052,7 +1261,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmdLine, int show
         isPreview = 1;
     } else if ((_strnicmp(commandLine, "/c", 2) == 0 || _strnicmp(commandLine, "/C", 2) == 0) &&
                commandHasNoArguments(commandLine + 2)) {
-        showConfigDialog(hInstance);
+        showConfigDialog();
         return 0;
     } else if (_strnicmp(commandLine, "/w", 2) == 0 && commandHasNoArguments(commandLine + 2)) {
         isAdjustment = 1;
@@ -1082,8 +1291,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmdLine, int show
         hwnd = CreateWindowExA(0, "BlackHoleSCR", "", style, 0, 0, g_W, g_H, previewParent, NULL, hInstance, NULL);
         g_preview = 1;
     } else if (isAdjustment) {
-        RECT outer = { 0, 0, 900, 600 + ADJUST_PANEL_HEIGHT };
-        style = WS_OVERLAPPEDWINDOW;
+        RECT outer = { 0, 0, 900, 600 };
+        style = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
         AdjustWindowRect(&outer, style, FALSE);
         g_W = 900;
         g_H = 600;
@@ -1106,13 +1315,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmdLine, int show
         MessageBoxA(NULL, "OpenGL 3.3+ not available", "Error", MB_OK | MB_ICONERROR);
         return 1;
     }
-    g_skySeed = makeSceneSeed();
+    g_sceneRandomState = makeSceneRandomState();
+    g_tick0 = GetTickCount64();
+    beginScene(g_tick0);
     if (!initShader()) {
         shutdownRenderer();
         DestroyWindow(hwnd);
         return 1;
     }
-    g_tick0 = GetTickCount64();
 
     // Prepare an initial frame before revealing a fullscreen saver. /w is also
     // initialized through this same one-context, one-draw path.
@@ -1129,6 +1339,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmdLine, int show
     if (g_fullscreen) hideCursor();
     ShowWindow(hwnd, g_fullscreen ? SW_SHOWNOACTIVATE : SW_SHOW);
     UpdateWindow(hwnd);
+    if (g_adjustmentMode && !showAdjustmentSettings(hwnd)) {
+        shutdownRenderer();
+        DestroyWindow(hwnd);
+        return 1;
+    }
 
     while (GetMessage(&msg, NULL, 0, 0) > 0) {
         TranslateMessage(&msg);

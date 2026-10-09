@@ -6,11 +6,9 @@ uniform float uStarGain;
 uniform float uDiskOpacity;
 uniform float uDoppler;
 uniform float uSkySeed;
+uniform vec2 uSkyFlowDirection;
 uniform float uStarDensity;
 uniform float uSkyFlowSpeed;
-// Zero in standard modes. /w reserves a lower native-controls panel, so this
-// converts absolute gl_FragCoord into the upper viewport's local coordinates.
-uniform float uViewportOriginY;
 uniform vec2 uSceneCenter;
 uniform float uApparentRadius;
 uniform vec4 uDiskLookA; // temperature, inclination, roll, inner radius
@@ -27,7 +25,7 @@ const float DISK_FILAMENT_FLOW_RATE = 0.0500;
 const float DISK_FILAMENT_SHEAR_RATE = 0.0350;
 const float DISK_FILAMENT_SHEAR_AMPLITUDE = 0.3500;
 // Deliberately visible world-direction translation, independent of the body.
-// uSkySeed selects one fixed random direction for each screensaver launch.
+// The host selects a bounded direction once per immutable scene interval.
 const float SKY_FLOW_SPEED = 0.1500;
 const float SKY_FLOW_DISTANCE_PER_PHASE = 0.2247;
 const float WORK_AREA     = 0.0;
@@ -140,13 +138,13 @@ const vec2 SKY_CLUSTER_CATALOG[8]=vec2[8](
 
 vec2 skyCoordinates(vec3 worldDir){
   vec2 worldTangent=worldDir.xy/max(-worldDir.z,0.05);
-  float skyTime=iTime*SKY_FLOW_SPEED*clamp(uSkyFlowSpeed,0.5,2.0);
+  float skyTime=iTime*SKY_FLOW_SPEED*clamp(uSkyFlowSpeed,0.0,5.0);
   vec2 skySeedOffset=(vec2(hash21(vec2(uSkySeed*17.0,7.0)),
                             hash21(vec2(uSkySeed*29.0,13.0)))-0.5)*0.18;
-  // Randomize direction once per launch, not over time: the sky translates in
-  // one straight world-space direction and never orbits the black hole.
-  float skyFlowAngle=6.2831853*hash21(vec2(uSkySeed*107.0,59.0));
-  vec2 skyFlowDirection=vec2(cos(skyFlowAngle),sin(skyFlowAngle));
+  // The host commits a nonzero unit direction at each scene boundary. Normalize
+  // defensively so the sky always translates straight in world coordinates and
+  // never orbits a black-hole or screen center.
+  vec2 skyFlowDirection=normalize(uSkyFlowDirection);
   vec2 skyDrift=skyTime*SKY_FLOW_DISTANCE_PER_PHASE*skyFlowDirection+skySeedOffset;
   return worldTangent-skyDrift;
 }
@@ -357,4 +355,4 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   fragColor=vec4(col,1.0);
 }
 out vec4 _fragOut;
-void main(){vec4 c;mainImage(c,gl_FragCoord.xy-vec2(0.0,uViewportOriginY));_fragOut=c;}
+void main(){vec4 c;mainImage(c,gl_FragCoord.xy);_fragOut=c;}

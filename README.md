@@ -22,18 +22,22 @@ procedural inertial sky while preserving a fixed, low-overhead runtime budget.
 - **Bounded ray integration** — a fixed 48-step Schwarzschild-style path is
   used for the shadow, disk intersections, and local sky deflection.
 - **Directional procedural sky** — a denser layered deep-star field, compact star
-  clusters, and a faint dust band are seeded once per run. The seed selects one
-  random straight world-direction drift per launch, never the black hole's
-  center, roll, or size; only escaping rays in the strong-lensing region sample a deflected direction from
-  that same moving sky. Deflected paths gather adjacent procedural catalogue
+  clusters, and a faint dust band are seeded once per bounded scene interval.
+  Each interval receives one random straight world-direction drift that remains
+  independent of the black-hole center, roll, and size; only escaping rays in
+  the strong-lensing region sample a deflected direction from that same moving
+  sky. Deflected paths gather adjacent procedural catalogue
   cells only near a source-cell edge, without changing star size; this prevents
   a source from flashing or disappearing as it enters or exits the lens.
   Only truly near-tangential non-captured exits smoothly fall back to direct
   sky; stable escaping rays retain full deflection rather than switching at a
   binary ray-exit threshold.
-- **Procedural accretion disk** — one named, fixed Schwarzschild-style scene
-  holds its camera/body composition while continuous wrapped disk-space
-  filaments evolve only within traced disk-plane intersections.
+- **Bounded scene choreography** — one host-owned Schwarzschild-style scene is
+  immutable for each 45-second interval. It randomly samples only approved
+  off-center position, apparent-radius, and north-hemisphere angle bounds,
+  spanning pole-on through near-equatorial views without flipping; continuous
+  wrapped disk-space filaments evolve only within traced disk-plane
+  intersections.
 - **GPU back-pressure** — a 10 ms timer is a maximum submission cadence, not a
   frame-rate promise. A single OpenGL fence allows at most one frame in flight;
   busy GPUs skip work rather than queueing full ray-traced frames.
@@ -61,22 +65,34 @@ scientific measurement, as a Kerr solver, or as a fluid/GRMHD simulation.
 The screensaver launches directly into a near-black procedural sky. It never
 captures, uploads, displays, or distorts the desktop.
 
-The active scene is the host-owned `STATIC_SCHWARZSCHILD` composition:
-center `(0.50, 0.50)`, apparent radius `0.120`, disk inclination `1.50 rad`,
-and roll `0.35 rad`. Its camera/body layout and `DiskLook` remain fixed for
-the whole run—there is no preset tour, Lissajous drift, or radius breathing.
-Disk material and the independent directional sky may still evolve. M6
-therefore has explicit relative motion: recognizable sky features translate
-past the fixed black-hole composition at `SKY_FLOW_SPEED = 0.1500`; each launch
-uses its `uSkySeed` to select one random fixed direction, while the sky still
-does not rotate around the black-hole or screen center. In the
-strong-lensing ring, a parity-reversed secondary star image can move locally
-opposite that direct background flow; this is a qualitative lensing effect,
-not body-following sky motion. Weak deflection remains continuously visible
-out to `4.00 * B_CRIT` within the existing traced domain. `uSkySeed` controls
-only sky layout and flow; no scene/material seed is active. The four sparse
-procedural-star catalogue layers use twice their former occupancy, preserving
-individual star size while doubling the baseline star count.
+The host owns one immutable active Schwarzschild-style scene at a time. Every
+45 seconds it performs an intentional hard cut and randomly samples a new
+bounded composition; no black hole drifts, breathes, or interpolates within an
+interval. Each scene randomly selects an apparent radius from `0.100–0.135`
+and a disk-normal polar angle from `0.050–1.480 rad`: near zero is the
+**north-pole / face-on** view, while the strictly sub-`pi/2` upper bound reaches
+near-equatorial / edge-on without crossing the disk plane or flipping to the
+opposite face. Roll remains `0.00–0.78 rad`.
+
+Each scene also selects one of four off-center placement slots: upper-left,
+upper-right, lower-left, or lower-right. Their X ranges are `0.30–0.42` or
+`0.58–0.70`, and their Y ranges are `0.33–0.47` or `0.53–0.67`, so a black-hole
+center is never `(0.50, 0.50)`. This is neither Kerr spin nor camera orbit.
+
+Disk material parameters remain fixed. Disk material time does not reset at a
+scene change. Each active scene samples and freezes a sky-layout seed, a
+straight world-direction sky flow, and a star density multiplier. The
+persisted **Star density** setting remains the user
+baseline and is multiplied by the bounded `0.85–1.15` scene value before the
+existing `0.5–2.0` shader safety clamp. `Sky flow speed` remains a speed-only
+control. Thus direct-sky features translate at `SKY_FLOW_SPEED = 0.1500` in
+one straight direction per scene and never orbit a black-hole or screen center.
+In the strong-lensing ring, a parity-reversed secondary star image can move
+locally opposite that direct background flow; this is a qualitative lensing
+effect, not body-following sky motion. Weak deflection remains continuously
+visible out to `4.00 * B_CRIT` within the existing traced domain. The four
+sparse procedural-star catalogue layers preserve individual star size while
+retaining their reviewed baseline occupancy.
 
 Below the truncated emissive inner edge, a non-emissive plunging-region
 occluder smoothly blocks background when it enters the slim disk body. A
@@ -98,27 +114,36 @@ simulation, texture, framebuffer, or additional rendering pass.
 
 The five `/c` settings are stored under `HKCU\Software\BlackHoleScreensaver`:
 
-- **Star brightness** — integer `0–100`, default `30`
-- **Disk opacity** — integer `0–100`, default `90`
-- **Doppler strength** — integer `0–100`, default `60`
-- **Star density** — integer `50–200%`, default `100%`
-- **Sky flow speed** — integer `50–200%`, default `100%`
+- **Star brightness** — physical integer `0–100`, default `30`
+- **Disk opacity** — physical integer `0–100`, default `90`
+- **Doppler strength** — physical integer `0–100`, default `60`
+- **Star density** — physical integer `50–200%`, default `100%`
+- **Sky flow speed** — physical integer `0–500%`, default `100%`
 
-Schema `ConfigSchemaVersion = 2` reads all five fields independently. Missing
+All five UI bars display a normalized `0.000–1.000` value. Brightness, disk
+opacity, and Doppler map linearly to `0–100%`; density maps to `50–200%`; and
+sky speed maps to `0–500%` (`0.200` is the original `100%` baseline and
+`1.000` is `500%`).
+
+Schema `ConfigSchemaVersion = 3` reads all five fields independently. Missing
 markers and schema 1 intentionally read only the legacy three and use 100% for
-both new controls; a malformed individual schema-v2 field defaults only that
-field, while malformed, zero (including an interrupted save), wrong-type, and
-future markers default all five. Loading never writes. **OK** uses an interrupted-save-safe sequence that
-first writes marker 0, then all fields, and only finally marker 2. Cancel and
-close never persist.
+both newer controls. Schema 2 remains compatible with its historical
+`50–200%` sky-speed range. A malformed individual schema-v3 field defaults
+only that field, while malformed, zero (including an interrupted save),
+wrong-type, and future markers default all five. Loading never writes. **OK**
+uses an interrupted-save-safe sequence that first writes marker 0, then all
+fields, and only finally marker 3. Cancel and close never persist.
 
-`/w` opens a non-topmost resizeable renderer window with five live native
-sliders, numeric labels, **Save**, and **Revert**. Slider changes are temporary
-and visible on the next frame. Save persists and establishes a new snapshot;
-Revert or closing with unsaved changes restores the entry snapshot without
-writing. Resizing keeps the renderer in an upper viewport with viewport-local fragment
-coordinates and all controls in a reserved lower panel. At 100% the M6 sky
-timing and catalogue calls remain on their exact baseline paths.
+`/c` and `/w` share one `BlackHoleSettings` window class and the same
+DPI-aware five-control layout. `/w` opens a non-topmost resizeable renderer
+window plus an owned floating settings tool window with live native sliders,
+numeric labels, **Save**, and **Revert**. The settings tool window is not an
+OpenGL child surface, so it remains visible while the renderer presents frames.
+Slider changes are temporary and visible on the next frame. Save persists and
+establishes a new snapshot; Revert or closing with unsaved changes restores the
+entry snapshot without writing. Closing the floating tool window closes the
+adjustment session. At 100% the M6 sky timing and catalogue calls remain on
+their exact baseline paths.
 
 As with a normal Windows screensaver, keyboard input, mouse buttons, or a
 meaningful mouse movement exits `/s` and `/d`. Preview mode is hosted by the
@@ -194,12 +219,13 @@ kept explicit so the Windows host, its one-frame fence policy, and the fragment
 source can evolve without silently changing the shipped source of truth.
 
 The milestone contract verifiers are development and CI tools, not runtime
-requirements. `tools\verify-milestone-7.ps1` validates schema v2, the live
-adjustment lifecycle, generated shader include, host-to-shader mappings, and
-retained rendering constraints. CI runs it, builds, runs the M6 OpenGL shader
-smoke, and runs the M7 configuration runtime smoke. Historical M1–M6 verifiers
-remain frozen milestone artifacts; the M4/M6 configuration assumptions are not
-updated for schema v2.
+requirements. `tools\verify-milestone-8.ps1` validates bounded immutable scene
+selection, off-center north-hemisphere angle/size bounds, generated shader include,
+host-to-shader mappings, retained M7 schema-v3/static settings invariants, and
+rendering constraints. CI runs it, builds, runs the M6 OpenGL shader smoke, and
+runs the M7 configuration runtime smoke. Historical M1–M7 verifiers remain
+frozen milestone artifacts; M8 explicitly retains and verifies the M7 settings
+behavior that applies after scene selection.
 
 ## Project layout
 

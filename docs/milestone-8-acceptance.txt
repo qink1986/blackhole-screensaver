@@ -1,0 +1,94 @@
+M8 acceptance: bounded randomized Schwarzschild scenes
+=====================================================
+
+Purpose
+-------
+M8 replaces M6's run-long fixed composition with one host-owned active scene.
+The active scene is randomly sampled only at a fixed scene boundary and is
+immutable for its whole interval. It remains a single Schwarzschild-style
+black-hole renderer: M8 adds neither a second body nor a new physical model.
+
+Scene lifecycle
+---------------
+- Each active scene lasts exactly 45 seconds (`M8_SCENE_DURATION_MS = 45000`).
+- An interval starts with one atomic `ActiveScene` commit. Its black-hole
+  position, apparent radius, disk orientation, sky-layout seed, sky-flow
+  direction, and star density multiplier do not change until its `endTick`.
+- A delayed render advances through every elapsed interval boundary before
+  rendering. Therefore it never derives a pose from a frame-local remainder or
+  drifts a body between boundaries.
+- A scene transition is an intentional hard cut. M8 does not crossfade,
+  interpolate two ray traces, add a second draw, or reset `iTime`; continuous
+  disk filaments retain their run-relative analytic time.
+
+Approved bounded scene range
+----------------------------
+The host samples only the following bounds. It never exposes scene geometry,
+quality, ray count, lens size, or position controls through `/c` or `/w`.
+
+- apparent radius: 0.100 through 0.135
+- inclination: 0.050 through 1.480 radians
+- roll: 0.00 through 0.78 radians
+
+Inclination is a **north-hemisphere polar angle** for the disk normal: `0` is
+the north-pole / face-on view and `pi/2` is the equatorial / edge-on limit.
+The approved upper bound `1.480` is strictly less than `pi/2`; random sampling
+therefore spans north-pole through near-equatorial views without crossing the
+disk plane, exposing its opposite face, or flipping orientation. It is not
+Kerr spin, precession, camera orbit, or a whole-screen rotation.
+
+The host randomly chooses one of four approved off-center placement slots on
+each scene boundary: upper-left X `0.30–0.42`, Y `0.33–0.47`; upper-right X
+`0.58–0.70`, Y `0.33–0.47`; lower-left X `0.30–0.42`, Y `0.53–0.67`; or
+lower-right X `0.58–0.70`, Y `0.53–0.67`. No slot includes `(0.50, 0.50)`, so
+the black-hole center is never in the screen center. A near-zero inclination
+sample provides the requested north-pole composition while retaining that
+off-center placement.
+
+All scenes retain the reviewed temperature `5500 K`, disk radii `1.80..8.00`,
+opacity/Doppler baselines `0.90/0.60`, and all remaining DiskLook values. This
+leaves the existing trace boundary, analytic disk-body query, weak-lensing
+domain, and fixed 48-step budget unchanged.
+
+Sky and density policy
+----------------------
+- Each scene samples one independent `uSkySeed`, which selects only the
+  procedural sky catalogue/layout details for that scene.
+- Each scene samples one unit `uSkyFlowDirection`; GLSL uses it as a straight
+  world-sky translation direction. It is fixed throughout that interval and
+  does not rotate around any black-hole or screen center.
+- The persisted M7 StarDensity setting remains a user baseline. The effective
+  shader density is that `50..200%` baseline multiplied by a per-scene random
+  `0.85..1.15` multiplier and then retained by the existing GLSL `0.5..2.0`
+  safety clamp. No registry schema, persistence field, or settings control is
+  added.
+- SkyFlowSpeed remains the persisted M7 `0..500%` setting. It changes speed
+  only, never the fixed-in-interval scene direction.
+
+Retained constraints
+--------------------
+- OpenGL 3.3, one OpenGL context, one `glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)`
+  per prepared frame, and bounded one-frame fence scheduling.
+- Canonical GLSL generates the checked-in embedded C include; the `.scr` does
+  not read a shader file at runtime.
+- `#define N_STEPS 48` remains the only geodesic integration budget.
+- No texture, sampler, FBO, desktop capture, post-processing, particle system,
+  runtime-selected quality path, GPU calibration, or extra rendering pass.
+- `/s`, `/p`, `/d`, `/c`, and `/w` retain M7 lifecycle, persistence, and
+  adjustment behavior.
+
+Manual final M8 gate
+--------------------
+1. Run `blackhole.scr /s` for at least 100 seconds.
+2. Within every 45-second interval, confirm that black-hole center, apparent
+   radius, disk angle, star pattern, sky direction, and apparent star density
+   remain stable except for the existing continuous material and straight
+   sky-flow motion.
+3. At an interval boundary, confirm that the visible cut selects a new bounded
+   composition and size rather than a body drift, a size breathing cycle, or a
+   blended second trace.
+4. Confirm both near-pole and near-equatorial scenes: the disk varies from
+   close to face-on to near edge-on without flipping to its opposite face, and
+   the black-hole center remains visibly off-screen-center.
+5. Confirm M7 `/c`, `/w`, and preview continue to work and that no new scene
+   controls have appeared.
