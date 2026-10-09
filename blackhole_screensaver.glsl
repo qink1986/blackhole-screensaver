@@ -6,6 +6,11 @@ uniform float uStarGain;
 uniform float uDiskOpacity;
 uniform float uDoppler;
 uniform float uSkySeed;
+uniform float uStarDensity;
+uniform float uSkyFlowSpeed;
+// Zero in standard modes. /w reserves a lower native-controls panel, so this
+// converts absolute gl_FragCoord into the upper viewport's local coordinates.
+uniform float uViewportOriginY;
 uniform vec2 uSceneCenter;
 uniform float uApparentRadius;
 uniform vec4 uDiskLookA; // temperature, inclination, roll, inner radius
@@ -135,7 +140,7 @@ const vec2 SKY_CLUSTER_CATALOG[8]=vec2[8](
 
 vec2 skyCoordinates(vec3 worldDir){
   vec2 worldTangent=worldDir.xy/max(-worldDir.z,0.05);
-  float skyTime=iTime*SKY_FLOW_SPEED;
+  float skyTime=iTime*SKY_FLOW_SPEED*clamp(uSkyFlowSpeed,0.5,2.0);
   vec2 skySeedOffset=(vec2(hash21(vec2(uSkySeed*17.0,7.0)),
                             hash21(vec2(uSkySeed*29.0,13.0)))-0.5)*0.18;
   // Randomize direction once per launch, not over time: the sky translates in
@@ -191,10 +196,19 @@ vec3 stars(vec3 worldDir,float gatherNeighbors){
   vec3 field=vec3(0.0);
   // Four stochastic layers provide a denser deep field without changing the
   // size or energy of an individual catalogue star.
-  field+=cellStars(skyTangent,10.0,0.400,3.0,core*1.18,gatherNeighbors);
-  field+=cellStars(skyTangent,17.0,0.680,19.0,core*0.92,gatherNeighbors);
-  field+=cellStars(skyTangent,27.0,0.840,43.0,core*0.72,gatherNeighbors);
-  field+=cellStars(skyTangent,41.0,0.920,71.0,core*0.58,gatherNeighbors);
+  // Keep the exact M6 calls at 1.0; density changes occupancy only.
+  float density=clamp(uStarDensity,0.5,2.0);
+  if(density==1.0){
+    field+=cellStars(skyTangent,10.0,0.400,3.0,core*1.18,gatherNeighbors);
+    field+=cellStars(skyTangent,17.0,0.680,19.0,core*0.92,gatherNeighbors);
+    field+=cellStars(skyTangent,27.0,0.840,43.0,core*0.72,gatherNeighbors);
+    field+=cellStars(skyTangent,41.0,0.920,71.0,core*0.58,gatherNeighbors);
+  }else{
+    field+=cellStars(skyTangent,10.0,1.0-min((1.0-0.400)*density,1.0),3.0,core*1.18,gatherNeighbors);
+    field+=cellStars(skyTangent,17.0,1.0-min((1.0-0.680)*density,1.0),19.0,core*0.92,gatherNeighbors);
+    field+=cellStars(skyTangent,27.0,1.0-min((1.0-0.840)*density,1.0),43.0,core*0.72,gatherNeighbors);
+    field+=cellStars(skyTangent,41.0,1.0-min((1.0-0.920)*density,1.0),71.0,core*0.58,gatherNeighbors);
+  }
   float angle=6.2831853*hash21(vec2(uSkySeed*43.0,23.0));
   vec2 offset=(vec2(hash21(vec2(uSkySeed*53.0,11.0)),
                     hash21(vec2(uSkySeed*61.0,31.0)))-0.5)*0.13;
@@ -343,4 +357,4 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   fragColor=vec4(col,1.0);
 }
 out vec4 _fragOut;
-void main(){vec4 c;mainImage(c,gl_FragCoord.xy);_fragOut=c;}
+void main(){vec4 c;mainImage(c,gl_FragCoord.xy-vec2(0.0,uViewportOriginY));_fragOut=c;}

@@ -1,0 +1,24 @@
+M7 acceptance
+=============
+
+Configuration schema v2 persists StarBrightness, DiskOpacity, Doppler,
+StarDensity, and SkyFlowSpeed. The first three remain 0..100 with defaults
+30/90/60; density and speed are 50..200 percent with defaults 100. Missing
+or v1 markers load only the legacy three fields and force both M7 settings to
+100. Invalid, zero (including a partial-save marker), wrong-type, and future markers default all fields. Schema v2 reads each field independently, so one malformed or out-of-range v2 field does not discard the other valid v2 values.
+
+/c only saves on OK. A save first writes schema marker 0, writes all five
+fields in order, then publishes marker 2. Cancel and close never persist.
+
+/w opens a resizeable normal window with the renderer and five live sliders.
+Its command syntax is standalone, and malformed /p, /d, or /w invocations are
+rejected rather than falling through to the fullscreen screen-saver path.
+Sliders immediately alter memory-only rendering. Save persists and updates the
+snapshot; Revert and an unsaved close restore the entry snapshot. Resizing
+retains an upper renderer viewport whose local fragment coordinates start at
+its own lower edge, and keeps all five controls in the reserved bottom panel.
+It retains
+one OpenGL context, one draw per frame, the one-pass fixed 48-step renderer,
+and no FBO, texture, or quality tier. At 100% density and sky speed, M6 sky
+catalogue thresholds and SKY_FLOW_SPEED timing remain exactly on their
+baseline paths.

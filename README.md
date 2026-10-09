@@ -13,8 +13,8 @@ procedural inertial sky while preserving a fixed, low-overhead runtime budget.
 
 ## Highlights
 
-- **Single-file Windows screensaver** — standard `/s`, `/p`, and `/c` behavior
-  in one `.scr`, with no installer or companion DLL.
+- **Single-file Windows screensaver** — standard `/s`, `/p`, `/c`, and live
+  `/w` adjustment behavior in one `.scr`, with no installer or companion DLL.
 - **OpenGL 3.3 baseline** — compatible with older integrated GPUs, including
   the Intel UHD-class hardware used for validation.
 - **One full-screen rendering pass** — no FBO, post-processing chain, texture
@@ -93,23 +93,32 @@ and outer rim without subdividing the fixed 48-step geodesic loop. Continuous
 wrapped filaments share a directional flow with bounded differential shear, so
 long-running radii do not accumulate into an increasingly dense unresolved
 sheet. They receive derivative-free footprint filtering where the critical lens
-ring would otherwise leave them unresolved. There are no procedural impact
-arcs, discrete clumps, particle system, fluid simulation, texture, framebuffer,
-pass, or user setting.
+ring would otherwise leave them unresolved. There are no procedural impact arcs, discrete clumps, particle system, fluid
+simulation, texture, framebuffer, or additional rendering pass.
 
-The three `/c` settings are stored under
-`HKCU\Software\BlackHoleScreensaver`:
+The five `/c` settings are stored under `HKCU\Software\BlackHoleScreensaver`:
 
 - **Star brightness** — integer `0–100`, default `30`
 - **Disk opacity** — integer `0–100`, default `90`
 - **Doppler strength** — integer `0–100`, default `60`
+- **Star density** — integer `50–200%`, default `100%`
+- **Sky flow speed** — integer `50–200%`, default `100%`
 
-The persisted schema records `ConfigSchemaVersion = 1`. Existing installations
-without that marker remain compatible: valid legacy values are read, but the
-registry is not rewritten until you explicitly choose **OK**. Missing,
-malformed, wrong-type, or out-of-range values safely fall back to defaults;
-an unknown future schema version falls back to all defaults rather than being
-misinterpreted. Cancel and the title-bar close button never write settings.
+Schema `ConfigSchemaVersion = 2` reads all five fields independently. Missing
+markers and schema 1 intentionally read only the legacy three and use 100% for
+both new controls; a malformed individual schema-v2 field defaults only that
+field, while malformed, zero (including an interrupted save), wrong-type, and
+future markers default all five. Loading never writes. **OK** uses an interrupted-save-safe sequence that
+first writes marker 0, then all fields, and only finally marker 2. Cancel and
+close never persist.
+
+`/w` opens a non-topmost resizeable renderer window with five live native
+sliders, numeric labels, **Save**, and **Revert**. Slider changes are temporary
+and visible on the next frame. Save persists and establishes a new snapshot;
+Revert or closing with unsaved changes restores the entry snapshot without
+writing. Resizing keeps the renderer in an upper viewport with viewport-local fragment
+coordinates and all controls in a reserved lower panel. At 100% the M6 sky
+timing and catalogue calls remain on their exact baseline paths.
 
 As with a normal Windows screensaver, keyboard input, mouse buttons, or a
 meaningful mouse movement exits `/s` and `/d`. Preview mode is hosted by the
@@ -165,9 +174,10 @@ For development, the normal modes are:
 
 ```text
 blackhole.scr /s        Full-screen screensaver
-blackhole.scr /p <HWND> Control-panel preview host
+blackhole.scr /p <HWND> Control-panel preview host (space before HWND required)
 blackhole.scr /c        Configuration dialog
 blackhole.scr /d        Full-screen debug path using the normal render lifecycle
+blackhole.scr /w        Resizeable real-time adjustment window
 ```
 
 ## Shader workflow
@@ -184,15 +194,12 @@ kept explicit so the Windows host, its one-frame fence policy, and the fragment
 source can evolve without silently changing the shipped source of truth.
 
 The milestone contract verifiers are development and CI tools, not runtime
-requirements. The current `tools\verify-milestone-6.ps1` validates the
-host-owned static scene, M4 configuration boundary, generated shader include,
-M3 directional-sky isolation, and retained rendering constraints from a normal
-checkout. CI then runs `tools\verify-milestone-6-runtime.ps1` against the
-built `.scr`: a live `/d` process proves that the runner's OpenGL 3.3 driver
-compiled and linked the embedded fragment shader. Historical M1–M3 verifiers
-remain useful for their respective frozen milestones and require Git history
-containing their immutable baseline commit; the M4 verifier remains as the
-frozen pre-M6 configuration contract.
+requirements. `tools\verify-milestone-7.ps1` validates schema v2, the live
+adjustment lifecycle, generated shader include, host-to-shader mappings, and
+retained rendering constraints. CI runs it, builds, runs the M6 OpenGL shader
+smoke, and runs the M7 configuration runtime smoke. Historical M1–M6 verifiers
+remain frozen milestone artifacts; the M4/M6 configuration assumptions are not
+updated for schema v2.
 
 ## Project layout
 

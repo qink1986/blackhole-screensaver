@@ -1,0 +1,13 @@
+{
+  "contract": "blackhole-screensaver-milestone-7",
+  "version": 1,
+  "schema": { "version": 2, "legacyVersion": 1, "legacyFields": ["StarBrightness", "DiskOpacity", "Doppler"], "v2Fields": ["StarBrightness", "DiskOpacity", "Doppler", "StarDensity", "SkyFlowSpeed"] },
+  "canonicalShader": { "path": "blackhole_screensaver.glsl", "generatedInclude": "generated/blackhole_screensaver_frag.inc", "sourceSha256": "773D27ACAC75A55B6ED9E143D5F5DB9F374C9E7C671748EE599B59EE82C27823" },
+  "settings": [
+    { "registry": "StarBrightness", "range": [0,100], "default": 30 },
+    { "registry": "DiskOpacity", "range": [0,100], "default": 90 },
+    { "registry": "Doppler", "range": [0,100], "default": 60 },
+    { "registry": "StarDensity", "range": [50,200], "default": 100 },
+    { "registry": "SkyFlowSpeed", "range": [50,200], "default": 100 }
+  ]
+}

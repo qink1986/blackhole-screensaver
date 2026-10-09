@@ -24,9 +24,9 @@ typedef unsigned long long GLuint64;
 typedef struct __GLsync* GLsync;
 #define GL_VERTEX_SHADER_ARB          0x8B31
 #define GL_FRAGMENT_SHADER_ARB        0x8B30
-#define GL_COMPILE_STATUS              0x8B81
-#define GL_LINK_STATUS                 0x8B82
-#define GL_INFO_LOG_LENGTH             0x8B84
+#define GL_COMPILE_STATUS             0x8B81
+#define GL_LINK_STATUS                0x8B82
+#define GL_INFO_LOG_LENGTH            0x8B84
 #define GL_COLOR_BUFFER_BIT           0x00004000
 #define GL_DEPTH_BUFFER_BIT           0x00000100
 #define GL_TRIANGLE_STRIP             0x0005
@@ -47,25 +47,22 @@ static HDC   hDC;
 static HWND  hWnd;
 static HINSTANCE hInst;
 static int   g_W, g_H;
-static int   g_preview = 0;   // running in preview mode
-static int   g_configured = 0;
+static int   g_preview = 0;
+static int   g_adjustmentMode = 0;
+static int   g_fullscreen = 0;
 static ULONGLONG g_tick0;
-static int   g_exitKey = 0;
-static int   g_exitMouse = 0;
 static POINT g_mousePrev;
 static int   g_mouseMoved = 0;
-static int   g_fullscreen = 0;
 static int   g_cursorHideCount = 0;
 static HCURSOR g_savedCursor;
 
-// Permit presentation attempts up to 100 fps. The one-pass 48-step ray marcher
-// still stays bounded by the one-frame fence and adaptive post-frame cooldown.
 #define FRAME_INTERVAL_MS 10
-// Slow frames get an additional bounded rest after their fence retires. The
-// elapsed time is host submit-to-observation time, not a hardware GPU query.
 #define FRAME_COOLDOWN_TRIGGER_MS (2ULL * FRAME_INTERVAL_MS)
 #define FRAME_COOLDOWN_DIVISOR 4ULL
 #define FRAME_COOLDOWN_MAX_MS 3000ULL
+#define ADJUST_PANEL_HEIGHT 205
+#define ADJUST_MIN_CLIENT_WIDTH 470
+#define ADJUST_MIN_CLIENT_HEIGHT (ADJUST_PANEL_HEIGHT + 180)
 
 typedef struct StaticSchwarzschildScene {
     GLfloat centerX;
@@ -104,6 +101,9 @@ typedef struct SceneState {
     GLfloat diskOpacity;
     GLfloat doppler;
     GLfloat skySeed;
+    GLfloat starDensity;
+    GLfloat skyFlowSpeed;
+    GLfloat viewportOriginY;
     StaticSchwarzschildScene scene;
 } SceneState;
 
@@ -118,20 +118,26 @@ static HANDLE g_shaderSmokeEvent;
 
 // ============================================================ config ==
 // Config stored in registry under HKCU\Software\BlackHoleScreensaver.
-// M4 accepts legacy unversioned values but writes only the validated v1 schema.
+// Schema v2 retains the three M4 values and adds only the two safe sky controls.
 #define REG_KEY "Software\\BlackHoleScreensaver"
 #define REG_VALUE_CONFIG_SCHEMA_VERSION "ConfigSchemaVersion"
-#define CONFIG_SCHEMA_VERSION 1u
+#define CONFIG_SCHEMA_VERSION 2u
 #define CONFIG_VALUE_MIN 0
 #define CONFIG_VALUE_MAX 100
+#define CONFIG_V2_VALUE_MIN 50
+#define CONFIG_V2_VALUE_MAX 200
 #define CONFIG_DEFAULT_STAR_BRIGHTNESS 30
 #define CONFIG_DEFAULT_DISK_OPACITY 90
 #define CONFIG_DEFAULT_DOPPLER 60
+#define CONFIG_DEFAULT_STAR_DENSITY 100
+#define CONFIG_DEFAULT_SKY_FLOW_SPEED 100
 
 typedef struct ConfigValues {
     int starBrightness;
     int diskOpacity;
     int doppler;
+    int starDensity;
+    int skyFlowSpeed;
 } ConfigValues;
 
 typedef enum ConfigRegistryValueStatus {
@@ -143,15 +149,15 @@ typedef enum ConfigRegistryValueStatus {
 static int cfg_starBrightness = CONFIG_DEFAULT_STAR_BRIGHTNESS;
 static int cfg_diskOpacity = CONFIG_DEFAULT_DISK_OPACITY;
 static int cfg_doppler = CONFIG_DEFAULT_DOPPLER;
+static int cfg_starDensity = CONFIG_DEFAULT_STAR_DENSITY;
+static int cfg_skyFlowSpeed = CONFIG_DEFAULT_SKY_FLOW_SPEED;
+static ConfigValues g_adjustmentSnapshot;
+static int g_adjustmentDirty = 0;
 
 // ============================================================ shader source ==
 // Canonical GLSL is generated into a C string include at build time. The
 // resulting source is compiled from this translation unit, so the runtime
 // remains a single self-contained .scr with no shader file reads.
-
-// Canonical GLSL lives in blackhole_screensaver.glsl. The checked-in generated
-// include is compiled into this translation unit; no shader file is read
-// by the running .scr. Regenerate it with tools\generate-shader-include.ps1.
 static const char shaderSource[] =
 #include "generated/blackhole_screensaver_frag.inc"
 ;
@@ -169,7 +175,6 @@ static const char* vertSrc =
 "}\n";
 
 // ============================================================ GL helpers ==
-// GL extension function pointer types
 typedef GLuint (APIENTRY *PFNGLCREATESHADERPROC)(GLenum);
 typedef void (APIENTRY *PFNGLSHADERSOURCEPROC)(GLuint, GLsizei, const GLchar**, const GLint*);
 typedef void (APIENTRY *PFNGLCOMPILESHADERPROC)(GLuint);
@@ -187,10 +192,7 @@ typedef void (APIENTRY *PFNGLUNIFORM4FPROC)(GLint, GLfloat, GLfloat, GLfloat, GL
 typedef GLsync (APIENTRY *PFNGLFENCESYNCPROC)(GLenum, GLbitfield);
 typedef GLenum (APIENTRY *PFNGLCLIENTWAITSYNCPROC)(GLsync, GLbitfield, GLuint64);
 typedef void (APIENTRY *PFNGLDELETESYNCPROC)(GLsync);
-
-#define GL_ARRAY_BUFFER               0x8892
-#define GL_STATIC_DRAW                0x88E4
-
+typedef void (APIENTRY *PFNGLGETPROGRAMINFOLOGPROC)(GLuint, GLsizei, GLsizei*, GLchar*);
 typedef void (APIENTRY *PFNGLGENVERTEXARRAYSPROC)(GLsizei, GLuint*);
 typedef void (APIENTRY *PFNGLBINDVERTEXARRAYPROC)(GLuint);
 typedef void (APIENTRY *PFNGLGENBUFFERSPROC)(GLsizei, GLuint*);
@@ -199,19 +201,6 @@ typedef void (APIENTRY *PFNGLBUFFERDATAPROC)(GLenum, GLsizei, const void*, GLenu
 typedef void (APIENTRY *PFNGLENABLEVERTEXATTRIBARRAYPROC)(GLuint);
 typedef void (APIENTRY *PFNGLVERTEXATTRIBPOINTERPROC)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*);
 typedef GLint (APIENTRY *PFNGLGETATTRIBLOCATIONPROC)(GLuint, const GLchar*);
-
-static PFNGLGENVERTEXARRAYSPROC       p_glGenVertexArrays;
-static PFNGLBINDVERTEXARRAYPROC       p_glBindVertexArray;
-static PFNGLGENBUFFERSPROC            p_glGenBuffers;
-static PFNGLBINDBUFFERPROC            p_glBindBuffer;
-static PFNGLBUFFERDATAPROC            p_glBufferData;
-static PFNGLENABLEVERTEXATTRIBARRAYPROC p_glEnableVertexAttribArray;
-static PFNGLVERTEXATTRIBPOINTERPROC   p_glVertexAttribPointer;
-static PFNGLGETATTRIBLOCATIONPROC     p_glGetAttribLocation;
-typedef void (APIENTRY *PFNGLGETPROGRAMINFOLOGPROC)(GLuint, GLsizei, GLsizei*, GLchar*);
-static PFNGLGETPROGRAMINFOLOGPROC   p_glGetProgramInfoLog;
-
-typedef HGLRC (APIENTRY *PFNWGLCREATECONTEXTATTRIBSARBPROC)(HDC, HGLRC, const int*);
 
 static PFNGLCREATESHADERPROC        glCreateShader;
 static PFNGLSHADERSOURCEPROC        glShaderSource;
@@ -230,10 +219,22 @@ static PFNGLUNIFORM4FPROC           glUniform4f;
 static PFNGLFENCESYNCPROC           p_glFenceSync;
 static PFNGLCLIENTWAITSYNCPROC      p_glClientWaitSync;
 static PFNGLDELETESYNCPROC          p_glDeleteSync;
+static PFNGLGETPROGRAMINFOLOGPROC   p_glGetProgramInfoLog;
+static PFNGLGENVERTEXARRAYSPROC     p_glGenVertexArrays;
+static PFNGLBINDVERTEXARRAYPROC     p_glBindVertexArray;
+static PFNGLGENBUFFERSPROC          p_glGenBuffers;
+static PFNGLBINDBUFFERPROC          p_glBindBuffer;
+static PFNGLBUFFERDATAPROC          p_glBufferData;
+static PFNGLENABLEVERTEXATTRIBARRAYPROC p_glEnableVertexAttribArray;
+static PFNGLVERTEXATTRIBPOINTERPROC p_glVertexAttribPointer;
+static PFNGLGETATTRIBLOCATIONPROC   p_glGetAttribLocation;
 
 static GLuint shaderProgram;
-static GLint  uTime = -1, uResolution = -1, uStarGain = -1, uDiskOpacity = -1, uDoppler = -1, uSkySeed = -1;
-static GLint  uSceneCenter = -1, uApparentRadius = -1, uDiskLookA = -1, uDiskLookB = -1, uDiskLookC = -1, uSceneExposure = -1;
+static GLint uTime = -1, uResolution = -1, uStarGain = -1, uDiskOpacity = -1;
+static GLint uDoppler = -1, uSkySeed = -1, uStarDensity = -1, uSkyFlowSpeed = -1;
+static GLint uViewportOriginY = -1;
+static GLint uSceneCenter = -1, uApparentRadius = -1, uDiskLookA = -1;
+static GLint uDiskLookB = -1, uDiskLookC = -1, uSceneExposure = -1;
 static GLuint vao;
 
 static void* getGLProc(const char* name) {
@@ -244,32 +245,32 @@ static void* getGLProc(const char* name) {
 }
 
 static int loadGLFunctions(void) {
-    glCreateShader       = (void*)getGLProc("glCreateShader");
-    glShaderSource       = (void*)getGLProc("glShaderSource");
-    glCompileShader      = (void*)getGLProc("glCompileShader");
-    glGetShaderiv        = (void*)getGLProc("glGetShaderiv");
-    glGetShaderInfoLog   = (void*)getGLProc("glGetShaderInfoLog");
-    glCreateProgram      = (void*)getGLProc("glCreateProgram");
-    glAttachShader       = (void*)getGLProc("glAttachShader");
-    glLinkProgram        = (void*)getGLProc("glLinkProgram");
-    glGetProgramiv       = (void*)getGLProc("glGetProgramiv");
-    glUseProgram         = (void*)getGLProc("glUseProgram");
+    glCreateShader = (void*)getGLProc("glCreateShader");
+    glShaderSource = (void*)getGLProc("glShaderSource");
+    glCompileShader = (void*)getGLProc("glCompileShader");
+    glGetShaderiv = (void*)getGLProc("glGetShaderiv");
+    glGetShaderInfoLog = (void*)getGLProc("glGetShaderInfoLog");
+    glCreateProgram = (void*)getGLProc("glCreateProgram");
+    glAttachShader = (void*)getGLProc("glAttachShader");
+    glLinkProgram = (void*)getGLProc("glLinkProgram");
+    glGetProgramiv = (void*)getGLProc("glGetProgramiv");
+    glUseProgram = (void*)getGLProc("glUseProgram");
     glGetUniformLocation = (void*)getGLProc("glGetUniformLocation");
-    glUniform1f          = (void*)getGLProc("glUniform1f");
-    glUniform2f          = (void*)getGLProc("glUniform2f");
-    glUniform4f          = (void*)getGLProc("glUniform4f");
-    p_glFenceSync        = (void*)getGLProc("glFenceSync");
-    p_glClientWaitSync   = (void*)getGLProc("glClientWaitSync");
-    p_glDeleteSync       = (void*)getGLProc("glDeleteSync");
-    p_glGenVertexArrays    = (void*)getGLProc("glGenVertexArrays");
-    p_glBindVertexArray    = (void*)getGLProc("glBindVertexArray");
-    p_glGenBuffers         = (void*)getGLProc("glGenBuffers");
-    p_glBindBuffer         = (void*)getGLProc("glBindBuffer");
-    p_glBufferData         = (void*)getGLProc("glBufferData");
+    glUniform1f = (void*)getGLProc("glUniform1f");
+    glUniform2f = (void*)getGLProc("glUniform2f");
+    glUniform4f = (void*)getGLProc("glUniform4f");
+    p_glFenceSync = (void*)getGLProc("glFenceSync");
+    p_glClientWaitSync = (void*)getGLProc("glClientWaitSync");
+    p_glDeleteSync = (void*)getGLProc("glDeleteSync");
+    p_glGenVertexArrays = (void*)getGLProc("glGenVertexArrays");
+    p_glBindVertexArray = (void*)getGLProc("glBindVertexArray");
+    p_glGenBuffers = (void*)getGLProc("glGenBuffers");
+    p_glBindBuffer = (void*)getGLProc("glBindBuffer");
+    p_glBufferData = (void*)getGLProc("glBufferData");
     p_glEnableVertexAttribArray = (void*)getGLProc("glEnableVertexAttribArray");
-    p_glVertexAttribPointer    = (void*)getGLProc("glVertexAttribPointer");
-    p_glGetAttribLocation  = (void*)getGLProc("glGetAttribLocation");
-    p_glGetProgramInfoLog  = (void*)getGLProc("glGetProgramInfoLog");
+    p_glVertexAttribPointer = (void*)getGLProc("glVertexAttribPointer");
+    p_glGetAttribLocation = (void*)getGLProc("glGetAttribLocation");
+    p_glGetProgramInfoLog = (void*)getGLProc("glGetProgramInfoLog");
     g_frameSyncReady = p_glFenceSync && p_glClientWaitSync && p_glDeleteSync;
     return glCreateShader && glShaderSource && glCompileShader && glGetShaderiv &&
         glGetShaderInfoLog && glCreateProgram && glAttachShader && glLinkProgram &&
@@ -290,16 +291,17 @@ static GLuint compileShader(GLenum type, const char* src) {
     GLuint s = glCreateShader(type);
     glShaderSource(s, 1, &src, NULL);
     glCompileShader(s);
-    GLint ok = 0;
-    glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        char log[4096];
-        GLint len = 0;
-        glGetShaderInfoLog(s, sizeof(log), &len, log);
-        char path[MAX_PATH];
-        getLogPath(path, sizeof(path));
-        FILE* f = fopen(path, "a");
-        if (f) { fprintf(f, "COMPILE ERROR (type %d):\n%s\n\n", type, log); fclose(f); }
+    {
+        GLint ok = 0;
+        glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+        if (!ok) {
+            char log[4096];
+            GLint len = 0;
+            char path[MAX_PATH];
+            glGetShaderInfoLog(s, sizeof(log), &len, log);
+            getLogPath(path, sizeof(path));
+            { FILE* f = fopen(path, "a"); if (f) { fprintf(f, "COMPILE ERROR (type %d):\n%s\n\n", type, log); fclose(f); } }
+        }
     }
     return s;
 }
@@ -309,12 +311,10 @@ static GLfloat makeSceneSeed(void) {
     DWORD seed;
     counter.QuadPart = 0;
     QueryPerformanceCounter(&counter);
-    seed = (DWORD)counter.LowPart ^ (DWORD)counter.HighPart ^
-           GetCurrentProcessId() ^ GetTickCount();
+    seed = (DWORD)counter.LowPart ^ (DWORD)counter.HighPart ^ GetCurrentProcessId() ^ GetTickCount();
     seed ^= seed << 13;
     seed ^= seed >> 17;
     seed ^= seed << 5;
-    // A 24-bit fraction is exactly representable in GLfloat and remains < 1.
     return (GLfloat)(seed & 0x00ffffffu) * (1.0f / 16777216.0f);
 }
 
@@ -327,56 +327,55 @@ static void signalShaderSmokeReady(void) {
 }
 
 static int initShader(void) {
-    // shaderSource is the deterministic generated form of the canonical
-    // GLSL file, already including #version and all fragment uniforms.
     GLuint vs = compileShader(GL_VERTEX_SHADER_ARB, vertSrc);
     GLuint fs = compileShader(GL_FRAGMENT_SHADER_ARB, shaderSource);
+    GLint ok = 0;
 
     shaderProgram = glCreateProgram();
     glAttachShader(shaderProgram, vs);
     glAttachShader(shaderProgram, fs);
     glLinkProgram(shaderProgram);
-
-    GLint ok = 0;
     glGetProgramiv(shaderProgram, GL_LINK_STATUS, &ok);
     if (!ok) {
         char log[4096];
         GLint len = 0;
-        p_glGetProgramInfoLog(shaderProgram, sizeof(log), &len, log);
         char path[MAX_PATH];
+        p_glGetProgramInfoLog(shaderProgram, sizeof(log), &len, log);
         getLogPath(path, sizeof(path));
-        FILE* f = fopen(path, "w");
-        if (f) { fprintf(f, "LINK ERROR:\n%s\n\nFRAGMENT SOURCE:\n%s\n", log, shaderSource); fclose(f); }
+        { FILE* f = fopen(path, "w"); if (f) { fprintf(f, "LINK ERROR:\n%s\n\nFRAGMENT SOURCE:\n%s\n", log, shaderSource); fclose(f); } }
         return 0;
     }
 
     glUseProgram(shaderProgram);
-    uTime       = glGetUniformLocation(shaderProgram, "iTime");
+    uTime = glGetUniformLocation(shaderProgram, "iTime");
     uResolution = glGetUniformLocation(shaderProgram, "iResolution");
-    uStarGain   = glGetUniformLocation(shaderProgram, "uStarGain");
-    uDiskOpacity= glGetUniformLocation(shaderProgram, "uDiskOpacity");
-    uDoppler    = glGetUniformLocation(shaderProgram, "uDoppler");
-    uSkySeed    = glGetUniformLocation(shaderProgram, "uSkySeed");
+    uStarGain = glGetUniformLocation(shaderProgram, "uStarGain");
+    uDiskOpacity = glGetUniformLocation(shaderProgram, "uDiskOpacity");
+    uDoppler = glGetUniformLocation(shaderProgram, "uDoppler");
+    uSkySeed = glGetUniformLocation(shaderProgram, "uSkySeed");
+    uStarDensity = glGetUniformLocation(shaderProgram, "uStarDensity");
+    uSkyFlowSpeed = glGetUniformLocation(shaderProgram, "uSkyFlowSpeed");
+    uViewportOriginY = glGetUniformLocation(shaderProgram, "uViewportOriginY");
     uSceneCenter = glGetUniformLocation(shaderProgram, "uSceneCenter");
     uApparentRadius = glGetUniformLocation(shaderProgram, "uApparentRadius");
     uDiskLookA = glGetUniformLocation(shaderProgram, "uDiskLookA");
     uDiskLookB = glGetUniformLocation(shaderProgram, "uDiskLookB");
     uDiskLookC = glGetUniformLocation(shaderProgram, "uDiskLookC");
     uSceneExposure = glGetUniformLocation(shaderProgram, "uSceneExposure");
-
-    // empty VAO — needed by some drivers even with gl_VertexID
     p_glGenVertexArrays(1, &vao);
     p_glBindVertexArray(vao);
-
     return 1;
 }
 
 // ============================================================ registry ==
 static ConfigValues makeDefaultConfig(void) {
-    ConfigValues config;
-    config.starBrightness = CONFIG_DEFAULT_STAR_BRIGHTNESS;
-    config.diskOpacity = CONFIG_DEFAULT_DISK_OPACITY;
-    config.doppler = CONFIG_DEFAULT_DOPPLER;
+    ConfigValues config = {
+        CONFIG_DEFAULT_STAR_BRIGHTNESS,
+        CONFIG_DEFAULT_DISK_OPACITY,
+        CONFIG_DEFAULT_DOPPLER,
+        CONFIG_DEFAULT_STAR_DENSITY,
+        CONFIG_DEFAULT_SKY_FLOW_SPEED
+    };
     return config;
 }
 
@@ -384,10 +383,29 @@ static int configValueIsValid(int value) {
     return value >= CONFIG_VALUE_MIN && value <= CONFIG_VALUE_MAX;
 }
 
+static int configV2ValueIsValid(int value) {
+    return value >= CONFIG_V2_VALUE_MIN && value <= CONFIG_V2_VALUE_MAX;
+}
+
+static int configIsValid(const ConfigValues* config) {
+    return configValueIsValid(config->starBrightness) &&
+        configValueIsValid(config->diskOpacity) &&
+        configValueIsValid(config->doppler) &&
+        configV2ValueIsValid(config->starDensity) &&
+        configV2ValueIsValid(config->skyFlowSpeed);
+}
+
 static void applyConfig(const ConfigValues* config) {
     cfg_starBrightness = config->starBrightness;
     cfg_diskOpacity = config->diskOpacity;
     cfg_doppler = config->doppler;
+    cfg_starDensity = config->starDensity;
+    cfg_skyFlowSpeed = config->skyFlowSpeed;
+}
+
+static ConfigValues currentConfig(void) {
+    ConfigValues config = { cfg_starBrightness, cfg_diskOpacity, cfg_doppler, cfg_starDensity, cfg_skyFlowSpeed };
+    return config;
 }
 
 static ConfigRegistryValueStatus readRegistryDword(HKEY key, const char* valueName, DWORD* value) {
@@ -396,17 +414,15 @@ static ConfigRegistryValueStatus readRegistryDword(HKEY key, const char* valueNa
     DWORD raw = 0;
     LONG result = RegQueryValueExA(key, valueName, NULL, &type, (LPBYTE)&raw, &bytes);
     if (result == ERROR_FILE_NOT_FOUND) return CONFIG_REGISTRY_VALUE_MISSING;
-    if (result != ERROR_SUCCESS) return CONFIG_REGISTRY_VALUE_INVALID;
-    if (type != REG_DWORD || bytes != sizeof(DWORD)) return CONFIG_REGISTRY_VALUE_INVALID;
+    if (result != ERROR_SUCCESS || type != REG_DWORD || bytes != sizeof(DWORD)) return CONFIG_REGISTRY_VALUE_INVALID;
     *value = raw;
     return CONFIG_REGISTRY_VALUE_VALID;
 }
 
-static int readValidatedConfigValue(HKEY key, const char* valueName, int fallback) {
+static int readValidatedConfigValue(HKEY key, const char* valueName, int fallback, int minimum, int maximum) {
     DWORD value = 0;
-    ConfigRegistryValueStatus status = readRegistryDword(key, valueName, &value);
-    if (status != CONFIG_REGISTRY_VALUE_VALID) return fallback;
-    if (value > (DWORD)CONFIG_VALUE_MAX) return fallback;
+    if (readRegistryDword(key, valueName, &value) != CONFIG_REGISTRY_VALUE_VALID) return fallback;
+    if (value < (DWORD)minimum || value > (DWORD)maximum) return fallback;
     return (int)value;
 }
 
@@ -417,65 +433,81 @@ static int writeRegistryDword(HKEY key, const char* valueName, DWORD value) {
 static void loadConfig(void) {
     ConfigValues config = makeDefaultConfig();
     HKEY key;
+    DWORD schemaVersion = 0;
+    ConfigRegistryValueStatus schemaStatus;
+
     if (RegOpenKeyExA(HKEY_CURRENT_USER, REG_KEY, 0, KEY_READ, &key) != ERROR_SUCCESS) {
         applyConfig(&config);
         return;
     }
-
-    DWORD schemaVersion = 0;
-    ConfigRegistryValueStatus schemaStatus = readRegistryDword(key, REG_VALUE_CONFIG_SCHEMA_VERSION, &schemaVersion);
-    // No marker is a supported M3-and-earlier configuration. A present marker
-    // must be exactly the current schema before its values are interpreted.
-    if (schemaStatus == CONFIG_REGISTRY_VALUE_MISSING) {
-        config.starBrightness = readValidatedConfigValue(key, "StarBrightness", config.starBrightness);
-        config.diskOpacity = readValidatedConfigValue(key, "DiskOpacity", config.diskOpacity);
-        config.doppler = readValidatedConfigValue(key, "Doppler", config.doppler);
+    schemaStatus = readRegistryDword(key, REG_VALUE_CONFIG_SCHEMA_VERSION, &schemaVersion);
+    // Absent marker and v1 deliberately ignore v2 values: an interrupted v2
+    // save uses marker 0 and therefore falls back to all safe defaults.
+    if (schemaStatus == CONFIG_REGISTRY_VALUE_MISSING ||
+        (schemaStatus == CONFIG_REGISTRY_VALUE_VALID && schemaVersion == 1u)) {
+        config.starBrightness = readValidatedConfigValue(key, "StarBrightness", config.starBrightness, CONFIG_VALUE_MIN, CONFIG_VALUE_MAX);
+        config.diskOpacity = readValidatedConfigValue(key, "DiskOpacity", config.diskOpacity, CONFIG_VALUE_MIN, CONFIG_VALUE_MAX);
+        config.doppler = readValidatedConfigValue(key, "Doppler", config.doppler, CONFIG_VALUE_MIN, CONFIG_VALUE_MAX);
     } else if (schemaStatus == CONFIG_REGISTRY_VALUE_VALID && schemaVersion == CONFIG_SCHEMA_VERSION) {
-        config.starBrightness = readValidatedConfigValue(key, "StarBrightness", config.starBrightness);
-        config.diskOpacity = readValidatedConfigValue(key, "DiskOpacity", config.diskOpacity);
-        config.doppler = readValidatedConfigValue(key, "Doppler", config.doppler);
+        config.starBrightness = readValidatedConfigValue(key, "StarBrightness", config.starBrightness, CONFIG_VALUE_MIN, CONFIG_VALUE_MAX);
+        config.diskOpacity = readValidatedConfigValue(key, "DiskOpacity", config.diskOpacity, CONFIG_VALUE_MIN, CONFIG_VALUE_MAX);
+        config.doppler = readValidatedConfigValue(key, "Doppler", config.doppler, CONFIG_VALUE_MIN, CONFIG_VALUE_MAX);
+        config.starDensity = readValidatedConfigValue(key, "StarDensity", config.starDensity, CONFIG_V2_VALUE_MIN, CONFIG_V2_VALUE_MAX);
+        config.skyFlowSpeed = readValidatedConfigValue(key, "SkyFlowSpeed", config.skyFlowSpeed, CONFIG_V2_VALUE_MIN, CONFIG_V2_VALUE_MAX);
     }
-    // Invalid or future version markers intentionally preserve safe defaults.
     RegCloseKey(key);
     applyConfig(&config);
 }
 
 static int saveConfig(const ConfigValues* config) {
     HKEY key;
-    int success;
-    if (!configValueIsValid(config->starBrightness) ||
-        !configValueIsValid(config->diskOpacity) ||
-        !configValueIsValid(config->doppler)) return 0;
-    if (RegCreateKeyExA(HKEY_CURRENT_USER, REG_KEY, 0, NULL, 0, KEY_SET_VALUE, NULL, &key, NULL) != ERROR_SUCCESS)
-        return 0;
+    int ok;
 
-    // Write the marker last. A failed first save therefore remains readable as
-    // legacy data rather than claiming a complete current-version schema.
-    success = writeRegistryDword(key, "StarBrightness", (DWORD)config->starBrightness);
-    success = writeRegistryDword(key, "DiskOpacity", (DWORD)config->diskOpacity) && success;
-    success = writeRegistryDword(key, "Doppler", (DWORD)config->doppler) && success;
-    success = writeRegistryDword(key, REG_VALUE_CONFIG_SCHEMA_VERSION, CONFIG_SCHEMA_VERSION) && success;
+    if (!configIsValid(config)) return 0;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, REG_KEY, 0, NULL, 0, KEY_SET_VALUE, NULL, &key, NULL) != ERROR_SUCCESS) return 0;
+
+    // Invalidate first. All writes short-circuit; schema 2 is published only
+    // once every setting has been stored, so a failed save cannot look valid.
+    ok = writeRegistryDword(key, REG_VALUE_CONFIG_SCHEMA_VERSION, 0);
+    if (ok) ok = writeRegistryDword(key, "StarBrightness", (DWORD)config->starBrightness);
+    if (ok) ok = writeRegistryDword(key, "DiskOpacity", (DWORD)config->diskOpacity);
+    if (ok) ok = writeRegistryDword(key, "Doppler", (DWORD)config->doppler);
+    if (ok) ok = writeRegistryDword(key, "StarDensity", (DWORD)config->starDensity);
+    if (ok) ok = writeRegistryDword(key, "SkyFlowSpeed", (DWORD)config->skyFlowSpeed);
+    if (ok) ok = writeRegistryDword(key, REG_VALUE_CONFIG_SCHEMA_VERSION, CONFIG_SCHEMA_VERSION);
     RegCloseKey(key);
-    return success;
+    return ok;
 }
 
-// ============================================================ config dialog ==
-// Programmatic config dialog (no .rc resource template needed)
-#define CFG_ID_STAR_SLIDER   201
-#define CFG_ID_DISK_SLIDER   202
-#define CFG_ID_DOPPLER_SLIDER 203
-#define CFG_ID_STAR_LABEL    204
-#define CFG_ID_DISK_LABEL    205
-#define CFG_ID_DOPPLER_LABEL 206
-#define CFG_ID_STAR_VAL      207
-#define CFG_ID_DISK_VAL      208
-#define CFG_ID_DOPPLER_VAL   209
-#define CFG_ID_OK            210
-#define CFG_ID_CANCEL        211
+// ============================================================ controls ==
+#define CFG_ID_STAR_SLIDER     201
+#define CFG_ID_DISK_SLIDER     202
+#define CFG_ID_DOPPLER_SLIDER  203
+#define CFG_ID_DENSITY_SLIDER  204
+#define CFG_ID_SPEED_SLIDER    205
+#define CFG_ID_STAR_LABEL      206
+#define CFG_ID_DISK_LABEL      207
+#define CFG_ID_DOPPLER_LABEL   208
+#define CFG_ID_DENSITY_LABEL   209
+#define CFG_ID_SPEED_LABEL     210
+#define CFG_ID_OK              211
+#define CFG_ID_CANCEL          212
+#define ADJ_ID_STAR_SLIDER     301
+#define ADJ_ID_DISK_SLIDER     302
+#define ADJ_ID_DOPPLER_SLIDER  303
+#define ADJ_ID_DENSITY_SLIDER  304
+#define ADJ_ID_SPEED_SLIDER    305
+#define ADJ_ID_STAR_LABEL      306
+#define ADJ_ID_DISK_LABEL      307
+#define ADJ_ID_DOPPLER_LABEL   308
+#define ADJ_ID_DENSITY_LABEL   309
+#define ADJ_ID_SPEED_LABEL     310
+#define ADJ_ID_SAVE            311
+#define ADJ_ID_REVERT          312
 #define CFG_WND_CLASS "BlackHoleConfig"
 #define CFG_BASE_DPI 96
 #define CFG_CLIENT_WIDTH 440
-#define CFG_CLIENT_HEIGHT 190
+#define CFG_CLIENT_HEIGHT 235
 
 static UINT configSystemDpi(void) {
     HDC screen = GetDC(NULL);
@@ -492,73 +524,107 @@ static int cfgScale(int logicalPixels, UINT dpi) {
     return MulDiv(logicalPixels, (int)dpi, CFG_BASE_DPI);
 }
 
-static void cfgUpdateLabel(HWND hwnd, int sliderId, int valId) {
-    char buf[8];
-    int pos = (int)SendDlgItemMessage(hwnd, sliderId, TBM_GETPOS, 0, 0);
-    wsprintfA(buf, "%d", pos);
-    SetDlgItemTextA(hwnd, valId, buf);
+static void setControlText(HWND hwnd, int controlId, int value, int percent) {
+    char buffer[16];
+    wsprintfA(buffer, percent ? "%d%%" : "%d", value);
+    SetDlgItemTextA(hwnd, controlId, buffer);
+}
+
+static void createSettingsControls(HWND hwnd, int sliderBase, int labelBase, int saveId, int revertId, const ConfigValues* config) {
+    static const char* names[5] = {
+        "Star Brightness:", "Disk Opacity:", "Doppler Effect:", "Star Density:", "Sky Flow Speed:"
+    };
+    int values[5] = {
+        config->starBrightness, config->diskOpacity, config->doppler, config->starDensity, config->skyFlowSpeed
+    };
+    HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    int index;
+
+    for (index = 0; index < 5; ++index) {
+        HWND control;
+        control = CreateWindowA("STATIC", names[index], WS_CHILD | WS_VISIBLE,
+            20, 10 + index * 30, 110, 20, hwnd, (HMENU)(INT_PTR)(sliderBase + 50 + index), hInst, NULL);
+        SendMessage(control, WM_SETFONT, (WPARAM)font, TRUE);
+        control = CreateWindowA(TRACKBAR_CLASSA, "", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS | TBS_TOOLTIPS,
+            140, 6 + index * 30, 200, 26, hwnd, (HMENU)(INT_PTR)(sliderBase + index), hInst, NULL);
+        SendMessage(control, TBM_SETRANGE, TRUE, MAKELONG(index < 3 ? CONFIG_VALUE_MIN : CONFIG_V2_VALUE_MIN,
+            index < 3 ? CONFIG_VALUE_MAX : CONFIG_V2_VALUE_MAX));
+        SendMessage(control, TBM_SETPOS, TRUE, values[index]);
+        SendMessage(control, WM_SETFONT, (WPARAM)font, TRUE);
+        control = CreateWindowA("STATIC", "", WS_CHILD | WS_VISIBLE | SS_CENTER,
+            350, 10 + index * 30, 55, 20, hwnd, (HMENU)(INT_PTR)(labelBase + index), hInst, NULL);
+        SendMessage(control, WM_SETFONT, (WPARAM)font, TRUE);
+        setControlText(hwnd, labelBase + index, values[index], index >= 3);
+    }
+    {
+        HWND control = CreateWindowA("BUTTON", saveId == ADJ_ID_SAVE ? "Save" : "OK",
+            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 240, 165, 80, 28,
+            hwnd, (HMENU)(INT_PTR)saveId, hInst, NULL);
+        SendMessage(control, WM_SETFONT, (WPARAM)font, TRUE);
+        control = CreateWindowA("BUTTON", revertId == ADJ_ID_REVERT ? "Revert" : "Cancel",
+            WS_CHILD | WS_VISIBLE, 330, 165, 80, 28,
+            hwnd, (HMENU)(INT_PTR)revertId, hInst, NULL);
+        SendMessage(control, WM_SETFONT, (WPARAM)font, TRUE);
+    }
+}
+
+static ConfigValues controlsConfig(HWND hwnd, int sliderBase) {
+    ConfigValues config;
+    config.starBrightness = (int)SendDlgItemMessage(hwnd, sliderBase, TBM_GETPOS, 0, 0);
+    config.diskOpacity = (int)SendDlgItemMessage(hwnd, sliderBase + 1, TBM_GETPOS, 0, 0);
+    config.doppler = (int)SendDlgItemMessage(hwnd, sliderBase + 2, TBM_GETPOS, 0, 0);
+    config.starDensity = (int)SendDlgItemMessage(hwnd, sliderBase + 3, TBM_GETPOS, 0, 0);
+    config.skyFlowSpeed = (int)SendDlgItemMessage(hwnd, sliderBase + 4, TBM_GETPOS, 0, 0);
+    return config;
+}
+
+static void setControlsConfig(HWND hwnd, int sliderBase, int labelBase, const ConfigValues* config) {
+    int values[5] = {
+        config->starBrightness, config->diskOpacity, config->doppler, config->starDensity, config->skyFlowSpeed
+    };
+    int index;
+    for (index = 0; index < 5; ++index) {
+        SendDlgItemMessage(hwnd, sliderBase + index, TBM_SETPOS, TRUE, values[index]);
+        setControlText(hwnd, labelBase + index, values[index], index >= 3);
+    }
+}
+
+static void updateLabels(HWND hwnd, int sliderBase, int labelBase) {
+    int index;
+    for (index = 0; index < 5; ++index) {
+        int value = (int)SendDlgItemMessage(hwnd, sliderBase + index, TBM_GETPOS, 0, 0);
+        setControlText(hwnd, labelBase + index, value, index >= 3);
+    }
+}
+
+static void layoutAdjustmentControls(HWND hwnd, int clientWidth, int clientHeight) {
+    int panelTop = clientHeight - ADJUST_PANEL_HEIGHT;
+    int sliderWidth = clientWidth - 240;
+    int index;
+    if (sliderWidth < 100) sliderWidth = 100;
+    for (index = 0; index < 5; ++index) {
+        int y = panelTop + 10 + index * 30;
+        MoveWindow(GetDlgItem(hwnd, ADJ_ID_STAR_SLIDER + index), 140, y, sliderWidth, 26, TRUE);
+        MoveWindow(GetDlgItem(hwnd, ADJ_ID_STAR_LABEL + index), clientWidth - 80, y + 4, 55, 20, TRUE);
+        MoveWindow(GetDlgItem(hwnd, ADJ_ID_STAR_SLIDER + 50 + index), 20, y + 4, 110, 20, TRUE);
+    }
+    MoveWindow(GetDlgItem(hwnd, ADJ_ID_SAVE), clientWidth - 200, clientHeight - 32, 80, 25, TRUE);
+    MoveWindow(GetDlgItem(hwnd, ADJ_ID_REVERT), clientWidth - 110, clientHeight - 32, 80, 25, TRUE);
 }
 
 static LRESULT CALLBACK ConfigWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
-        HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        UINT dpi = configSystemDpi();
-        // The logical layout scales with the process's system-DPI coordinate
-        // space, so its controls remain within the explicitly sized client area.
-        HWND h;
-        h = CreateWindowA("STATIC", "Star Brightness:", WS_CHILD | WS_VISIBLE, cfgScale(20, dpi), cfgScale(20, dpi), cfgScale(110, dpi), cfgScale(20, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_STAR_LABEL, NULL, NULL);
-        SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
-        h = CreateWindowA("STATIC", "Disk Opacity:", WS_CHILD | WS_VISIBLE, cfgScale(20, dpi), cfgScale(60, dpi), cfgScale(110, dpi), cfgScale(20, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_DISK_LABEL, NULL, NULL);
-        SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
-        h = CreateWindowA("STATIC", "Doppler Effect:", WS_CHILD | WS_VISIBLE, cfgScale(20, dpi), cfgScale(100, dpi), cfgScale(110, dpi), cfgScale(20, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_DOPPLER_LABEL, NULL, NULL);
-        SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
-        h = CreateWindowA(TRACKBAR_CLASSA, "", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS | TBS_TOOLTIPS,
-            cfgScale(140, dpi), cfgScale(16, dpi), cfgScale(200, dpi), cfgScale(30, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_STAR_SLIDER, NULL, NULL);
-        SendMessage(h, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
-        SendMessage(h, TBM_SETPOS, TRUE, cfg_starBrightness);
-        SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
-        h = CreateWindowA(TRACKBAR_CLASSA, "", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS | TBS_TOOLTIPS,
-            cfgScale(140, dpi), cfgScale(56, dpi), cfgScale(200, dpi), cfgScale(30, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_DISK_SLIDER, NULL, NULL);
-        SendMessage(h, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
-        SendMessage(h, TBM_SETPOS, TRUE, cfg_diskOpacity);
-        SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
-        h = CreateWindowA(TRACKBAR_CLASSA, "", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS | TBS_TOOLTIPS,
-            cfgScale(140, dpi), cfgScale(96, dpi), cfgScale(200, dpi), cfgScale(30, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_DOPPLER_SLIDER, NULL, NULL);
-        SendMessage(h, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
-        SendMessage(h, TBM_SETPOS, TRUE, cfg_doppler);
-        SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
-        char buf[8];
-        wsprintfA(buf, "%d", cfg_starBrightness);
-        h = CreateWindowA("STATIC", buf, WS_CHILD | WS_VISIBLE | SS_CENTER, cfgScale(350, dpi), cfgScale(20, dpi), cfgScale(40, dpi), cfgScale(20, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_STAR_VAL, NULL, NULL);
-        SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
-        wsprintfA(buf, "%d", cfg_diskOpacity);
-        h = CreateWindowA("STATIC", buf, WS_CHILD | WS_VISIBLE | SS_CENTER, cfgScale(350, dpi), cfgScale(60, dpi), cfgScale(40, dpi), cfgScale(20, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_DISK_VAL, NULL, NULL);
-        SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
-        wsprintfA(buf, "%d", cfg_doppler);
-        h = CreateWindowA("STATIC", buf, WS_CHILD | WS_VISIBLE | SS_CENTER, cfgScale(350, dpi), cfgScale(100, dpi), cfgScale(40, dpi), cfgScale(20, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_DOPPLER_VAL, NULL, NULL);
-        SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
-        h = CreateWindowA("BUTTON", "OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, cfgScale(240, dpi), cfgScale(140, dpi), cfgScale(80, dpi), cfgScale(28, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_OK, NULL, NULL);
-        SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
-        h = CreateWindowA("BUTTON", "Cancel", WS_CHILD | WS_VISIBLE, cfgScale(330, dpi), cfgScale(140, dpi), cfgScale(80, dpi), cfgScale(28, dpi), hwnd, (HMENU)(intptr_t)CFG_ID_CANCEL, NULL, NULL);
-        SendMessage(h, WM_SETFONT, (WPARAM)hFont, TRUE);
+        ConfigValues config = currentConfig();
+        createSettingsControls(hwnd, CFG_ID_STAR_SLIDER, CFG_ID_STAR_LABEL, CFG_ID_OK, CFG_ID_CANCEL, &config);
         return 0;
     }
-    case WM_HSCROLL: {
-        HWND hTB = (HWND)lp;
-        int id = GetDlgCtrlID(hTB);
-        if (id == CFG_ID_STAR_SLIDER)   cfgUpdateLabel(hwnd, CFG_ID_STAR_SLIDER,   CFG_ID_STAR_VAL);
-        if (id == CFG_ID_DISK_SLIDER)   cfgUpdateLabel(hwnd, CFG_ID_DISK_SLIDER,   CFG_ID_DISK_VAL);
-        if (id == CFG_ID_DOPPLER_SLIDER) cfgUpdateLabel(hwnd, CFG_ID_DOPPLER_SLIDER, CFG_ID_DOPPLER_VAL);
+    case WM_HSCROLL:
+        updateLabels(hwnd, CFG_ID_STAR_SLIDER, CFG_ID_STAR_LABEL);
         return 0;
-    }
-    case WM_COMMAND: {
-        int id = LOWORD(wp);
-        if (id == CFG_ID_OK) {
-            ConfigValues pending;
-            pending.starBrightness = (int)SendDlgItemMessage(hwnd, CFG_ID_STAR_SLIDER,   TBM_GETPOS, 0, 0);
-            pending.diskOpacity = (int)SendDlgItemMessage(hwnd, CFG_ID_DISK_SLIDER,   TBM_GETPOS, 0, 0);
-            pending.doppler = (int)SendDlgItemMessage(hwnd, CFG_ID_DOPPLER_SLIDER, TBM_GETPOS, 0, 0);
+    case WM_COMMAND:
+        if (LOWORD(wp) == CFG_ID_OK) {
+            ConfigValues pending = controlsConfig(hwnd, CFG_ID_STAR_SLIDER);
             if (!saveConfig(&pending)) {
                 MessageBoxA(hwnd, "Settings could not be saved.", "BlackHole Screensaver Settings", MB_OK | MB_ICONERROR);
                 return 0;
@@ -567,12 +633,11 @@ static LRESULT CALLBACK ConfigWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             DestroyWindow(hwnd);
             return 0;
         }
-        if (id == CFG_ID_CANCEL) {
+        if (LOWORD(wp) == CFG_ID_CANCEL) {
             DestroyWindow(hwnd);
             return 0;
         }
         break;
-    }
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -580,32 +645,35 @@ static LRESULT CALLBACK ConfigWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProc(hwnd, msg, wp, lp);
 }
 
-static void showConfigDialog(HINSTANCE hInst) {
-    WNDCLASSEXA wc = {0};
-    wc.cbSize = sizeof(wc);
-    wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc = ConfigWndProc;
-    wc.hInstance = hInst;
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.lpszClassName = CFG_WND_CLASS;
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    RegisterClassExA(&wc);
-
+static void showConfigDialog(HINSTANCE instance) {
+    WNDCLASSEXA windowClass = {0};
+    RECT outer;
     UINT dpi = configSystemDpi();
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
-    RECT outer = { 0, 0, cfgScale(CFG_CLIENT_WIDTH, dpi), cfgScale(CFG_CLIENT_HEIGHT, dpi) };
+    HWND hwnd;
+    MSG msg;
+
+    windowClass.cbSize = sizeof(windowClass);
+    windowClass.style = CS_HREDRAW | CS_VREDRAW;
+    windowClass.lpfnWndProc = ConfigWndProc;
+    windowClass.hInstance = instance;
+    windowClass.hCursor = LoadCursor(NULL, IDC_ARROW);
+    windowClass.lpszClassName = CFG_WND_CLASS;
+    windowClass.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    RegisterClassExA(&windowClass);
+
+    outer.left = 0;
+    outer.top = 0;
+    outer.right = cfgScale(CFG_CLIENT_WIDTH, dpi);
+    outer.bottom = cfgScale(CFG_CLIENT_HEIGHT, dpi);
     AdjustWindowRectEx(&outer, style, FALSE, WS_EX_DLGMODALFRAME);
-    int w = outer.right - outer.left, h = outer.bottom - outer.top;
-    int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
-    HWND hwnd = CreateWindowExA(WS_EX_DLGMODALFRAME, CFG_WND_CLASS,
-        "BlackHole Screensaver Settings", style,
-        (sw - w) / 2, (sh - h) / 2, w, h,
-        NULL, NULL, hInst, NULL);
+    hwnd = CreateWindowExA(WS_EX_DLGMODALFRAME, CFG_WND_CLASS, "BlackHole Screensaver Settings", style,
+        (GetSystemMetrics(SM_CXSCREEN) - (outer.right - outer.left)) / 2,
+        (GetSystemMetrics(SM_CYSCREEN) - (outer.bottom - outer.top)) / 2,
+        outer.right - outer.left, outer.bottom - outer.top, NULL, NULL, instance, NULL);
     if (!hwnd) return;
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
-
-    MSG msg;
     while (GetMessage(&msg, NULL, 0, 0) > 0) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
@@ -614,10 +682,10 @@ static void showConfigDialog(HINSTANCE hInst) {
 
 // ============================================================ WGL init ==
 static int initOpenGL(HWND hwnd) {
+    PIXELFORMATDESCRIPTOR pfd = {0};
+    int pixelFormat;
     hDC = GetDC(hwnd);
     if (!hDC) return 0;
-
-    PIXELFORMATDESCRIPTOR pfd = {0};
     pfd.nSize = sizeof(pfd);
     pfd.nVersion = 1;
     pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
@@ -625,71 +693,48 @@ static int initOpenGL(HWND hwnd) {
     pfd.cColorBits = 32;
     pfd.cDepthBits = 24;
     pfd.iLayerType = PFD_MAIN_PLANE;
-
-    int pf = ChoosePixelFormat(hDC, &pfd);
-    if (!pf || !SetPixelFormat(hDC, pf, &pfd)) return 0;
-
+    pixelFormat = ChoosePixelFormat(hDC, &pfd);
+    if (!pixelFormat || !SetPixelFormat(hDC, pixelFormat, &pfd)) return 0;
     hRC = wglCreateContext(hDC);
     if (!hRC || !wglMakeCurrent(hDC, hRC)) return 0;
-
-    // Prefer the GLSL 3.30 core context required by the embedded shader.
-    typedef HGLRC (APIENTRY *PFNWGLCREATECONTEXTATTRIBSARBPROC)(HDC, HGLRC, const int*);
-    PFNWGLCREATECONTEXTATTRIBSARBPROC wglCreateContextAttribsARB =
-        (void*)getGLProc("wglCreateContextAttribsARB");
-    if (wglCreateContextAttribsARB) {
-        int attribs[] = {
-            0x2091, 3,  // WGL_CONTEXT_MAJOR_VERSION_ARB = 3
-            0x2092, 3,  // WGL_CONTEXT_MINOR_VERSION_ARB = 3
-            0x209B, 1,  // WGL_CONTEXT_PROFILE_MASK_ARB = WGL_CONTEXT_CORE_PROFILE_BIT_ARB
-            0
-        };
-        HGLRC newRC = wglCreateContextAttribsARB(hDC, NULL, attribs);
-        if (newRC) {
-            wglMakeCurrent(NULL, NULL);
-            wglDeleteContext(hRC);
-            hRC = newRC;
-            if (!wglMakeCurrent(hDC, hRC)) return 0;
+    {
+        typedef HGLRC (APIENTRY *PFNWGLCREATECONTEXTATTRIBSARBPROC)(HDC, HGLRC, const int*);
+        PFNWGLCREATECONTEXTATTRIBSARBPROC createContext = (void*)getGLProc("wglCreateContextAttribsARB");
+        if (createContext) {
+            int attributes[] = { 0x2091, 3, 0x2092, 3, 0x209B, 1, 0 };
+            HGLRC newer = createContext(hDC, NULL, attributes);
+            if (newer) {
+                wglMakeCurrent(NULL, NULL);
+                wglDeleteContext(hRC);
+                hRC = newer;
+                if (!wglMakeCurrent(hDC, hRC)) return 0;
+            }
         }
     }
-
     return loadGLFunctions();
 }
 
 static void shutdownRenderer(void) {
     g_frameSubmitTick = 0;
     g_nextFrameEligibleTick = 0;
-    if (g_shaderSmokeEvent) {
-        CloseHandle(g_shaderSmokeEvent);
-        g_shaderSmokeEvent = NULL;
-    }
+    if (g_shaderSmokeEvent) { CloseHandle(g_shaderSmokeEvent); g_shaderSmokeEvent = NULL; }
     if (hRC && hDC) {
         if (wglMakeCurrent(hDC, hRC)) {
             if (g_frameFence && p_glDeleteSync) p_glDeleteSync(g_frameFence);
             g_frameFence = NULL;
-        } else {
-            g_frameFence = NULL;
-        }
+        } else g_frameFence = NULL;
         wglMakeCurrent(NULL, NULL);
         wglDeleteContext(hRC);
         hRC = NULL;
     }
-    if (hDC && hWnd) {
-        ReleaseDC(hWnd, hDC);
-        hDC = NULL;
-    }
+    if (hDC && hWnd) { ReleaseDC(hWnd, hDC); hDC = NULL; }
 }
 
-// ============================================================ screensaver proc ==
+// ============================================================ renderer ==
 static void completeFrameSchedule(ULONGLONG completedTick) {
     ULONGLONG elapsed = 0;
     ULONGLONG cooldown = 0;
-    if (g_frameSubmitTick && completedTick >= g_frameSubmitTick)
-        elapsed = completedTick - g_frameSubmitTick;
-
-    // A completion observed within two timer periods is already governed by
-    // the 100 fps cap. Longer frames receive a bounded fractional rest: the
-    // one-frame fence still prevents queue growth, while this avoids doubling
-    // every measured GPU frame interval and causing visible sky-motion jumps.
+    if (g_frameSubmitTick && completedTick >= g_frameSubmitTick) elapsed = completedTick - g_frameSubmitTick;
     if (elapsed > FRAME_COOLDOWN_TRIGGER_MS) {
         cooldown = (elapsed - FRAME_INTERVAL_MS) / FRAME_COOLDOWN_DIVISOR;
         if (cooldown > FRAME_COOLDOWN_MAX_MS) cooldown = FRAME_COOLDOWN_MAX_MS;
@@ -722,8 +767,6 @@ static int previousFrameComplete(ULONGLONG now) {
     if (result == GL_WAIT_FAILED) {
         p_glDeleteSync(g_frameFence);
         g_frameFence = NULL;
-        // Fall back to a one-off synchronous wait rather than letting an
-        // unreliable driver build an unbounded queue of ray-march frames.
         glFinish();
         completeFrameSchedule(GetTickCount64());
         return 0;
@@ -735,13 +778,9 @@ static int presentPreparedFrame(void) {
     GLsync fence = NULL;
     ULONGLONG submitTick;
     if (g_frameSyncReady) fence = p_glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-    // Capture the host timestamp after fence creation and before SwapBuffers,
-    // which may itself flush or block on some drivers.
     submitTick = GetTickCount64();
     if (!SwapBuffers(hDC)) {
         if (fence && p_glDeleteSync) p_glDeleteSync(fence);
-        // A failed present does not prove the draw was discarded. Retire the
-        // submitted work synchronously before a later timer can try again.
         g_frameSubmitTick = submitTick;
         glFinish();
         completeFrameSchedule(GetTickCount64());
@@ -750,12 +789,8 @@ static int presentPreparedFrame(void) {
     if (fence) {
         g_frameFence = fence;
         g_frameSubmitTick = submitTick;
-        // Ensure the non-blocking fence is submitted; the next timer tick
-        // skips rendering until this completed frame has retired on the GPU.
         glFlush();
     } else {
-        // Compatibility fallback for a driver that exposes GLSL 3.30 but not
-        // the sync entry points: never let it queue more than one frame.
         g_frameSubmitTick = submitTick;
         glFinish();
         completeFrameSchedule(GetTickCount64());
@@ -768,12 +803,13 @@ static SceneState makeSceneState(ULONGLONG now) {
     state.elapsedSeconds = (float)(now - g_tick0) / 1000.0f;
     state.resolutionX = (float)g_W;
     state.resolutionY = (float)g_H;
-    // M4 guarantees bounded persisted controls; keep this compatible raw
-    // percentage-to-uniform mapping while GLSL clamps remain defense in depth.
     state.starGain = (float)cfg_starBrightness / 100.0f;
     state.diskOpacity = (float)cfg_diskOpacity / 100.0f;
     state.doppler = (float)cfg_doppler / 100.0f;
     state.skySeed = g_skySeed;
+    state.starDensity = (float)cfg_starDensity / 100.0f;
+    state.skyFlowSpeed = (float)cfg_skyFlowSpeed / 100.0f;
+    state.viewportOriginY = g_adjustmentMode ? (GLfloat)ADJUST_PANEL_HEIGHT : 0.0f;
     state.scene = STATIC_SCHWARZSCHILD;
     return state;
 }
@@ -781,10 +817,13 @@ static SceneState makeSceneState(ULONGLONG now) {
 static void uploadSceneState(const SceneState* state) {
     glUniform1f(uTime, state->elapsedSeconds);
     glUniform2f(uResolution, state->resolutionX, state->resolutionY);
-    if (uStarGain >= 0)    glUniform1f(uStarGain, state->starGain);
+    if (uStarGain >= 0) glUniform1f(uStarGain, state->starGain);
     if (uDiskOpacity >= 0) glUniform1f(uDiskOpacity, state->diskOpacity);
-    if (uDoppler >= 0)     glUniform1f(uDoppler, state->doppler);
-    if (uSkySeed >= 0)     glUniform1f(uSkySeed, state->skySeed);
+    if (uDoppler >= 0) glUniform1f(uDoppler, state->doppler);
+    if (uSkySeed >= 0) glUniform1f(uSkySeed, state->skySeed);
+    if (uStarDensity >= 0) glUniform1f(uStarDensity, state->starDensity);
+    if (uSkyFlowSpeed >= 0) glUniform1f(uSkyFlowSpeed, state->skyFlowSpeed);
+    if (uViewportOriginY >= 0) glUniform1f(uViewportOriginY, state->viewportOriginY);
     if (uSceneCenter >= 0) glUniform2f(uSceneCenter, state->scene.centerX, state->scene.centerY);
     if (uApparentRadius >= 0) glUniform1f(uApparentRadius, state->scene.apparentRadius);
     if (uDiskLookA >= 0) glUniform4f(uDiskLookA, state->scene.temperature, state->scene.inclination, state->scene.roll, state->scene.innerRadius);
@@ -792,24 +831,22 @@ static void uploadSceneState(const SceneState* state) {
     if (uDiskLookC >= 0) glUniform4f(uDiskLookC, state->scene.gain, state->scene.contrast, state->scene.wind, state->scene.materialSpeed);
     if (uSceneExposure >= 0) glUniform1f(uSceneExposure, state->scene.exposure);
 }
+
 static int renderFrame(int present) {
     ULONGLONG now = GetTickCount64();
     const SceneState state = makeSceneState(now);
+    int viewportY = 0;
+    if (g_adjustmentMode) viewportY = ADJUST_PANEL_HEIGHT;
 
-    glViewport(0, 0, g_W, g_H);
+    glViewport(0, viewportY, g_W, g_H);
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
     glUseProgram(shaderProgram);
     uploadSceneState(&state);
-
-    // fullscreen quad
     p_glBindVertexArray(vao);
     // glDrawArrays is part of OpenGL 1.1 and is exported by opengl32.dll.
-    // Resolving it through wglGetProcAddress hangs on some Intel drivers.
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     p_glBindVertexArray(0);
-
     return present ? presentPreparedFrame() : 1;
 }
 
@@ -820,31 +857,27 @@ static void renderVisibleFrame(void) {
     renderFrame(1);
 }
 
+// ============================================================ window behavior ==
 static void hideCursor(void) {
     if (g_cursorHideCount) return;
-    do {
-        ++g_cursorHideCount;
-    } while (ShowCursor(FALSE) >= 0);
+    do { ++g_cursorHideCount; } while (ShowCursor(FALSE) >= 0);
     g_savedCursor = SetCursor(NULL);
 }
 
 static void restoreCursor(void) {
     if (!g_cursorHideCount) return;
-    while (g_cursorHideCount > 0) {
-        ShowCursor(TRUE);
-        --g_cursorHideCount;
-    }
+    while (g_cursorHideCount > 0) { ShowCursor(TRUE); --g_cursorHideCount; }
     SetCursor(g_savedCursor);
     g_savedCursor = NULL;
 }
 
 static int shouldExit(void) {
-    POINT pt;
-    GetCursorPos(&pt);
+    POINT point;
+    GetCursorPos(&point);
     if (g_mouseMoved) {
-        int dx = pt.x - g_mousePrev.x;
-        int dy = pt.y - g_mousePrev.y;
-        if (dx*dx + dy*dy > 25) return 1;  // moved more than 5px
+        int dx = point.x - g_mousePrev.x;
+        int dy = point.y - g_mousePrev.y;
+        if (dx * dx + dy * dy > 25) return 1;
     }
     if (GetAsyncKeyState(VK_ESCAPE) & 0x8000) return 1;
     if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) return 1;
@@ -857,49 +890,102 @@ static int shouldExit(void) {
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_SETCURSOR:
-        if (g_fullscreen && g_cursorHideCount) {
-            SetCursor(NULL);
-            return TRUE;
-        }
+        if (g_fullscreen && g_cursorHideCount) { SetCursor(NULL); return TRUE; }
         break;
     case WM_CREATE:
-        SetTimer(hwnd, 1, FRAME_INTERVAL_MS, NULL);  // 100 fps submission cap
+        if (g_adjustmentMode) {
+            ConfigValues config = currentConfig();
+            RECT client;
+            g_adjustmentSnapshot = config;
+            createSettingsControls(hwnd, ADJ_ID_STAR_SLIDER, ADJ_ID_STAR_LABEL, ADJ_ID_SAVE, ADJ_ID_REVERT, &config);
+            GetClientRect(hwnd, &client);
+            layoutAdjustmentControls(hwnd, client.right, client.bottom);
+        }
+        SetTimer(hwnd, 1, FRAME_INTERVAL_MS, NULL);
         g_tick0 = GetTickCount64();
         GetCursorPos(&g_mousePrev);
-        g_mouseMoved = 0;  // ignore the first mouse message after showing the saver
+        g_mouseMoved = 0;
         return 0;
-    case WM_TIMER:
-        if (!g_preview && shouldExit()) {
-            PostQuitMessage(0);
+    case WM_GETMINMAXINFO:
+        if (g_adjustmentMode) {
+            MINMAXINFO* info = (MINMAXINFO*)lp;
+            RECT outer = { 0, 0, ADJUST_MIN_CLIENT_WIDTH, ADJUST_MIN_CLIENT_HEIGHT };
+            AdjustWindowRect(&outer, WS_OVERLAPPEDWINDOW, FALSE);
+            info->ptMinTrackSize.x = outer.right - outer.left;
+            info->ptMinTrackSize.y = outer.bottom - outer.top;
             return 0;
         }
+        break;
+    case WM_TIMER:
+        if (!g_preview && !g_adjustmentMode && shouldExit()) { PostQuitMessage(0); return 0; }
         renderVisibleFrame();
         return 0;
     case WM_MOUSEMOVE:
-        if (!g_preview) {
-            POINT pt;
-            pt.x = GET_X_LPARAM(lp);
-            pt.y = GET_Y_LPARAM(lp);
-            ClientToScreen(hwnd, &pt);
+        if (!g_preview && !g_adjustmentMode) {
+            POINT point;
+            point.x = GET_X_LPARAM(lp);
+            point.y = GET_Y_LPARAM(lp);
+            ClientToScreen(hwnd, &point);
             if (g_mouseMoved) {
-                int dx = pt.x - g_mousePrev.x;
-                int dy = pt.y - g_mousePrev.y;
-                if (dx*dx + dy*dy > 25) {
-                    PostQuitMessage(0);
-                    return 0;
-                }
+                int dx = point.x - g_mousePrev.x;
+                int dy = point.y - g_mousePrev.y;
+                if (dx * dx + dy * dy > 25) { PostQuitMessage(0); return 0; }
             }
-            g_mousePrev = pt;
+            g_mousePrev = point;
             g_mouseMoved = 1;
         }
         return 0;
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
-        PostQuitMessage(0);
+        if (!g_adjustmentMode) PostQuitMessage(0);
         return 0;
     case WM_LBUTTONDOWN:
     case WM_RBUTTONDOWN:
-        if (!g_preview) PostQuitMessage(0);
+        if (!g_preview && !g_adjustmentMode) PostQuitMessage(0);
+        return 0;
+    case WM_HSCROLL:
+        if (g_adjustmentMode) {
+            ConfigValues config = controlsConfig(hwnd, ADJ_ID_STAR_SLIDER);
+            applyConfig(&config);
+            updateLabels(hwnd, ADJ_ID_STAR_SLIDER, ADJ_ID_STAR_LABEL);
+            g_adjustmentDirty = 1;
+        }
+        return 0;
+    case WM_COMMAND:
+        if (g_adjustmentMode && LOWORD(wp) == ADJ_ID_SAVE) {
+            ConfigValues config = controlsConfig(hwnd, ADJ_ID_STAR_SLIDER);
+            if (!saveConfig(&config)) {
+                MessageBoxA(hwnd, "Settings could not be saved.", "BlackHole Screensaver Settings", MB_OK | MB_ICONERROR);
+                return 0;
+            }
+            applyConfig(&config);
+            g_adjustmentSnapshot = config;
+            g_adjustmentDirty = 0;
+            return 0;
+        }
+        if (g_adjustmentMode && LOWORD(wp) == ADJ_ID_REVERT) {
+            applyConfig(&g_adjustmentSnapshot);
+            setControlsConfig(hwnd, ADJ_ID_STAR_SLIDER, ADJ_ID_STAR_LABEL, &g_adjustmentSnapshot);
+            g_adjustmentDirty = 0;
+            return 0;
+        }
+        break;
+    case WM_SIZE:
+        if (g_adjustmentMode) {
+            int clientWidth = LOWORD(lp);
+            int clientHeight = HIWORD(lp);
+            g_W = clientWidth;
+            g_H = clientHeight - ADJUST_PANEL_HEIGHT;
+            if (g_H < 1) g_H = 1;
+            layoutAdjustmentControls(hwnd, clientWidth, clientHeight);
+        } else {
+            g_W = LOWORD(lp);
+            g_H = HIWORD(lp);
+        }
+        return 0;
+    case WM_CLOSE:
+        if (g_adjustmentMode && g_adjustmentDirty) applyConfig(&g_adjustmentSnapshot);
+        DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
         KillTimer(hwnd, 1);
@@ -910,133 +996,144 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 // ============================================================ entry point ==
-// /s       = screensaver mode (fullscreen)
-// /p ####  = preview mode (parent window handle)
-// /c ####  = configure (parent window handle)
-// no args  = configure (settings dialog)
+static int commandHasNoArguments(const char* command) {
+    while (*command == ' ' || *command == '\t') ++command;
+    return *command == 0;
+}
 
+static int parsePreviewParent(char* text, HWND* parent) {
+    char* end;
+    unsigned long long raw;
+    while (*text == ' ' || *text == '\t') ++text;
+    if (*text == 0 || *text == '-' || *text == '+') return 0;
+    raw = _strtoui64(text, &end, 0);
+    if (end == text || !commandHasNoArguments(end) || raw == 0) return 0;
+    *parent = (HWND)(UINT_PTR)raw;
+    return IsWindow(*parent) != 0;
+}
+
+// /s = screensaver, /p <HWND> = preview, /c = configuration, /d = fullscreen
+// debug lifecycle, /w = interactive windowed adjustment.
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmdLine, int show) {
-    (void)hPrev; (void)cmdLine; (void)show;
-    SetProcessDPIAware();  // Primary-screen metrics use physical pixels.
-    hInst = hInstance;
-    loadConfig();
-
-    // parse command line
-    LPSTR cl = GetCommandLineA();
-    // skip program name
-    if (*cl == '"') { cl++; while (*cl && *cl != '"') cl++; if (*cl) cl++; }
-    else { while (*cl && *cl != ' ') cl++; }
-    while (*cl == ' ') cl++;
-
+    LPSTR commandLine;
     int isPreview = 0;
+    int isAdjustment = 0;
     HWND previewParent = NULL;
-
-    if (_strnicmp(cl, "/s", 2) == 0) {
-        LPSTR end = cl + 2;
-        while (*end == ' ' || *end == '\t') ++end;
-        // Accept only standalone /s, matching the screensaver control-panel contract.
-        if (*end != 0) return 0;
-    } else if (_strnicmp(cl, "/p", 2) == 0) {
-        isPreview = 1;
-        cl += 2;
-        while (*cl == ' ') cl++;
-        previewParent = (HWND)(LONG_PTR)atol(cl);
-    } else if (_strnicmp(cl, "/c", 2) == 0 || _strnicmp(cl, "/C", 2) == 0 || cl[0] == 0) {
-        // configure
-        showConfigDialog(hInstance);
-        return 0;
-    } else if (_strnicmp(cl, "/a", 2) == 0) {
-        // /a = password change — just exit
-        return 0;
-    } else if (_strnicmp(cl, "/d", 2) == 0) {
-        // Debug explicitly uses the same non-preview rendering path as /s.
-        g_preview = 0;
-    }
-
-    WNDCLASSEXA wc = {0};
-    wc.cbSize = sizeof(wc);
-    wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc = WndProc;
-    wc.hInstance = hInstance;
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.lpszClassName = "BlackHoleSCR";
-    RegisterClassExA(&wc);
-
+    WNDCLASSEXA windowClass = {0};
     HWND hwnd;
     DWORD style;
+    MSG msg;
 
-    if (isPreview && previewParent) {
-        RECT rc;
-        GetClientRect(previewParent, &rc);
+    (void)hPrev;
+    (void)cmdLine;
+    (void)show;
+    SetProcessDPIAware();
+    hInst = hInstance;
+    InitCommonControls();
+    loadConfig();
+
+    commandLine = GetCommandLineA();
+    if (*commandLine == '"') {
+        ++commandLine;
+        while (*commandLine && *commandLine != '"') ++commandLine;
+        if (*commandLine) ++commandLine;
+    } else while (*commandLine && *commandLine != ' ') ++commandLine;
+    while (*commandLine == ' ' || *commandLine == '\t') ++commandLine;
+
+    if (commandLine[0] == 0) {
+        showConfigDialog(hInstance);
+        return 0;
+    }
+    if (_strnicmp(commandLine, "/s", 2) == 0 && commandHasNoArguments(commandLine + 2)) {
+        // Standard fullscreen screen-saver mode.
+    } else if (_strnicmp(commandLine, "/p", 2) == 0) {
+        if (commandLine[2] != ' ' && commandLine[2] != '\t') return 0;
+        if (!parsePreviewParent(commandLine + 2, &previewParent)) return 0;
+        isPreview = 1;
+    } else if ((_strnicmp(commandLine, "/c", 2) == 0 || _strnicmp(commandLine, "/C", 2) == 0) &&
+               commandHasNoArguments(commandLine + 2)) {
+        showConfigDialog(hInstance);
+        return 0;
+    } else if (_strnicmp(commandLine, "/w", 2) == 0 && commandHasNoArguments(commandLine + 2)) {
+        isAdjustment = 1;
+        g_adjustmentMode = 1;
+    } else if (_strnicmp(commandLine, "/a", 2) == 0 && commandHasNoArguments(commandLine + 2)) {
+        return 0;
+    } else if (_strnicmp(commandLine, "/d", 2) == 0 && commandHasNoArguments(commandLine + 2)) {
+        // /d intentionally uses the same non-preview fullscreen path as /s.
+    } else {
+        return 0;
+    }
+
+    windowClass.cbSize = sizeof(windowClass);
+    windowClass.style = CS_HREDRAW | CS_VREDRAW;
+    windowClass.lpfnWndProc = WndProc;
+    windowClass.hInstance = hInstance;
+    windowClass.hCursor = LoadCursor(NULL, IDC_ARROW);
+    windowClass.lpszClassName = "BlackHoleSCR";
+    RegisterClassExA(&windowClass);
+
+    if (isPreview) {
+        RECT client;
+        GetClientRect(previewParent, &client);
         style = WS_CHILD;
-        g_W = rc.right;
-        g_H = rc.bottom;
-        hwnd = CreateWindowExA(0, "BlackHoleSCR", "", style,
-            0, 0, g_W, g_H, previewParent, NULL, hInstance, NULL);
+        g_W = client.right;
+        g_H = client.bottom;
+        hwnd = CreateWindowExA(0, "BlackHoleSCR", "", style, 0, 0, g_W, g_H, previewParent, NULL, hInstance, NULL);
         g_preview = 1;
+    } else if (isAdjustment) {
+        RECT outer = { 0, 0, 900, 600 + ADJUST_PANEL_HEIGHT };
+        style = WS_OVERLAPPEDWINDOW;
+        AdjustWindowRect(&outer, style, FALSE);
+        g_W = 900;
+        g_H = 600;
+        hwnd = CreateWindowExA(0, "BlackHoleSCR", "Black Hole Live Adjustment", style,
+            CW_USEDEFAULT, CW_USEDEFAULT, outer.right - outer.left, outer.bottom - outer.top,
+            NULL, NULL, hInstance, NULL);
     } else {
         style = WS_POPUP;
         g_W = GetSystemMetrics(SM_CXSCREEN);
         g_H = GetSystemMetrics(SM_CYSCREEN);
-        hwnd = CreateWindowExA(WS_EX_TOPMOST, "BlackHoleSCR", "", style,
-            0, 0, g_W, g_H, NULL, NULL, hInstance, NULL);
+        hwnd = CreateWindowExA(WS_EX_TOPMOST, "BlackHoleSCR", "", style, 0, 0, g_W, g_H, NULL, NULL, hInstance, NULL);
         g_fullscreen = 1;
     }
 
     if (!hwnd) return 1;
     hWnd = hwnd;
-
     if (!initOpenGL(hwnd)) {
         shutdownRenderer();
         DestroyWindow(hwnd);
         MessageBoxA(NULL, "OpenGL 3.3+ not available", "Error", MB_OK | MB_ICONERROR);
         return 1;
     }
-
-    // The sky catalogue, offset, and straight flow direction are seeded once
-    // per screensaver launch. The fixed scene has no material-event seed.
     g_skySeed = makeSceneSeed();
     if (!initShader()) {
         shutdownRenderer();
         DestroyWindow(hwnd);
         return 1;
     }
-    // Start the self-running drifting tour at a known phase after shader setup.
     g_tick0 = GetTickCount64();
 
-    // Finish and present one frame while hidden so the topmost popup never
-    // exposes an uninitialized black front buffer. Per-frame work uses a
-    // non-blocking fence.
-    {
-        int initialFramePresented = renderFrame(1);
-        if (!initialFramePresented) {
-            // Never reveal a fullscreen popup with an uninitialized front
-            // buffer. Leaving the display untouched is safer than flashing
-            // black when the driver's hidden present has failed.
-            shutdownRenderer();
-            DestroyWindow(hwnd);
-            return 1;
-        }
-        glFinish();
-        // The hidden first frame is fully retired before display; do not let
-        // it create a cooldown before the first visible update.
-        if (g_frameFence && p_glDeleteSync) p_glDeleteSync(g_frameFence);
-        g_frameFence = NULL;
-        resetFrameSchedule(GetTickCount64());
-        // The smoke event is set only after OpenGL initialization, shader
-        // compile/link, and the hidden first present have all completed.
-        signalShaderSmokeReady();
-        if (g_fullscreen) hideCursor();
-        ShowWindow(hwnd, g_fullscreen ? SW_SHOWNOACTIVATE : SW_SHOW);
+    // Prepare an initial frame before revealing a fullscreen saver. /w is also
+    // initialized through this same one-context, one-draw path.
+    if (!renderFrame(1)) {
+        shutdownRenderer();
+        DestroyWindow(hwnd);
+        return 1;
     }
+    glFinish();
+    if (g_frameFence && p_glDeleteSync) p_glDeleteSync(g_frameFence);
+    g_frameFence = NULL;
+    resetFrameSchedule(GetTickCount64());
+    signalShaderSmokeReady();
+    if (g_fullscreen) hideCursor();
+    ShowWindow(hwnd, g_fullscreen ? SW_SHOWNOACTIVATE : SW_SHOW);
     UpdateWindow(hwnd);
 
-    MSG msg;
     while (GetMessage(&msg, NULL, 0, 0) > 0) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
-
     restoreCursor();
     shutdownRenderer();
     DestroyWindow(hwnd);

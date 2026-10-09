@@ -22,9 +22,9 @@ jobs:
         with:
           arch: x64
 
-      - name: Verify Milestone 6 contract
+      - name: Verify Milestone 7 contract
         shell: powershell
-        run: .\tools\verify-milestone-6.ps1
+        run: .\tools\verify-milestone-7.ps1
 
       - name: Build
         shell: cmd
@@ -33,6 +33,10 @@ jobs:
       - name: Smoke OpenGL shader compile and link
         shell: powershell
         run: .\tools\verify-milestone-6-runtime.ps1 -Executable .\blackhole.scr
+
+      - name: Verify Milestone 7 runtime configuration
+        shell: powershell
+        run: .\tools\verify-milestone-7-runtime.ps1 -Executable .\blackhole.scr
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
