@@ -167,16 +167,21 @@ try {
 catch {
     Fail "Contract JSON is invalid: $($_.Exception.Message)"
 }
-if ($contract.contract -ne 'blackhole-screensaver-milestone-6' -or [int]$contract.version -ne 4) {
+if ($contract.contract -ne 'blackhole-screensaver-milestone-6' -or [int]$contract.version -ne 5) {
     Fail 'Unexpected contract identity or version'
 }
-if ($contract.scope -ne 'named-static-schwarzschild-scene-with-impact-arcs-and-slim-disk') {
+if ($contract.scope -ne 'named-static-schwarzschild-scene-with-slim-disk') {
     Fail 'Unexpected contract scope'
 }
 if ($contract.relativeMotion.bodyComposition -ne 'fixed' -or
     $contract.relativeMotion.backgroundMapping -ne 'seeded-random-world-direction-translation' -or
-    [math]::Abs([double]$contract.relativeMotion.backgroundSkyFlowSpeed - 0.075) -gt 0.000001 -or
+    [math]::Abs([double]$contract.relativeMotion.backgroundSkyFlowSpeed - 0.150) -gt 0.000001 -or
     [math]::Abs([double]$contract.relativeMotion.flowDistancePerPhase - 0.2247) -gt 0.000001 -or
+    $contract.relativeMotion.catalogueOccupancy.Count -ne 4 -or
+    [math]::Abs([double]$contract.relativeMotion.catalogueOccupancy[0] - 0.60) -gt 0.000001 -or
+    [math]::Abs([double]$contract.relativeMotion.catalogueOccupancy[1] - 0.32) -gt 0.000001 -or
+    [math]::Abs([double]$contract.relativeMotion.catalogueOccupancy[2] - 0.16) -gt 0.000001 -or
+    [math]::Abs([double]$contract.relativeMotion.catalogueOccupancy[3] - 0.08) -gt 0.000001 -or
     $contract.relativeMotion.directionSeed -ne 'uSkySeed' -or
     $contract.relativeMotion.directionLifetime -ne 'one-direction-per-screensaver-launch') {
     Fail 'Unexpected M6 relative-motion policy'
@@ -226,27 +231,21 @@ if ($contract.innerFlowSkyOccluder.model -ne 'smooth-ray-space-background-occlud
     $contract.innerFlowSkyOccluder.diskEmission -ne 'preserved') {
     Fail 'Unexpected M6 inner-flow sky-occluder policy'
 }
-if ($contract.impactArcMaterial.model -ne 'three-staggered-deterministic-disk-space-impact-arcs' -or
-    $contract.impactArcMaterial.materialSeed -ne 'uSceneSeed' -or
-    $contract.impactArcMaterial.descriptorState -ne 'reconstructed-from-time-and-seed' -or
-    [int]$contract.impactArcMaterial.candidateCount -ne 3 -or
-    [math]::Abs([double]$contract.impactArcMaterial.slotSeconds - 11.0) -gt 0.000001 -or
-    $contract.impactArcMaterial.lifetimeSeconds.Count -ne 2 -or
-    [math]::Abs([double]$contract.impactArcMaterial.lifetimeSeconds[0] - 18.0) -gt 0.000001 -or
-    [math]::Abs([double]$contract.impactArcMaterial.lifetimeSeconds[1] - 22.0) -gt 0.000001 -or
-    $contract.impactArcMaterial.inflow -ne 'exponential-inward' -or
-    [math]::Abs([double]$contract.impactArcMaterial.inflowRate - 0.0100) -gt 0.000001 -or
-    $contract.impactArcMaterial.differentialShear -ne 'birth-radius-dependent-kepler-like-phase' -or
-    $contract.impactArcMaterial.birthRadialRange.Count -ne 2 -or
-    [math]::Abs([double]$contract.impactArcMaterial.birthRadialRange[0] - 0.34) -gt 0.000001 -or
-    [math]::Abs([double]$contract.impactArcMaterial.birthRadialRange[1] - 0.82) -gt 0.000001 -or
-    $contract.impactArcMaterial.birthAngularHalfTurnsRange.Count -ne 2 -or
-    [math]::Abs([double]$contract.impactArcMaterial.birthAngularHalfTurnsRange[0] - 0.010) -gt 0.000001 -or
-    [math]::Abs([double]$contract.impactArcMaterial.birthAngularHalfTurnsRange[1] - 0.020) -gt 0.000001 -or
-    $contract.impactArcMaterial.globalMacroReplay -ne 'forbidden' -or
-    $contract.impactArcMaterial.baseDisk -ne 'continuous-wrapped-filaments' -or
-    $contract.impactArcMaterial.rendering -ne 'bounded-density-modulation-at-slim-disk-entry') {
-    Fail 'Unexpected deterministic impact-arc material policy'
+if ($contract.filamentMaterial.model -ne 'continuous-bounded-shear-wrapped-filaments' -or
+    [math]::Abs([double]$contract.filamentMaterial.flowRate - 0.0500) -gt 0.000001 -or
+    [math]::Abs([double]$contract.filamentMaterial.shearRate - 0.0350) -gt 0.000001 -or
+    [math]::Abs([double]$contract.filamentMaterial.shearAmplitude - 0.3500) -gt 0.000001 -or
+    $contract.filamentMaterial.unboundedPhaseAccumulation -ne 'forbidden' -or
+    $contract.filamentMaterial.layers.Count -ne 2 -or
+    [math]::Abs([double]$contract.filamentMaterial.layers[0].radialScale - 1.8) -gt 0.000001 -or
+    [math]::Abs([double]$contract.filamentMaterial.layers[0].angularPeriod - 11.0) -gt 0.000001 -or
+    [math]::Abs([double]$contract.filamentMaterial.layers[0].swirlScale - 1.20) -gt 0.000001 -or
+    [math]::Abs([double]$contract.filamentMaterial.layers[0].weight - 0.70) -gt 0.000001 -or
+    [math]::Abs([double]$contract.filamentMaterial.layers[1].radialScale - 0.7) -gt 0.000001 -or
+    [math]::Abs([double]$contract.filamentMaterial.layers[1].angularPeriod - 5.0) -gt 0.000001 -or
+    [math]::Abs([double]$contract.filamentMaterial.layers[1].swirlScale - 0.70) -gt 0.000001 -or
+    [math]::Abs([double]$contract.filamentMaterial.layers[1].weight - 0.30) -gt 0.000001) {
+    Fail 'Unexpected bounded continuous-filament material policy'
 }
 if ($contract.slimDiskGeometry.model -ne 'analytic-finite-constant-thickness-disk-body' -or
     [math]::Abs([double]$contract.slimDiskGeometry.halfThickness - 0.0350) -gt 0.000001 -or
@@ -283,7 +282,8 @@ Require-Contains $sceneRuntimeProbe '$passed = $true' 'Event-gated shader smoke 
 Require-NotContains $sceneRuntimeProbe 'Start-Sleep -Milliseconds 1250' 'Liveness-only shader smoke acceptance'
 $acceptance = [System.IO.File]::ReadAllText($acceptancePath, [System.Text.Encoding]::UTF8).Replace("`r`n", "`n").Replace("`r", "`n")
 Require-Contains $acceptance 'M6 requires visible relative motion:' 'M6 relative-motion acceptance rule'
-Require-Contains $acceptance 'SKY_FLOW_SPEED = 0.0750' 'M6 reviewed background-flow speed'
+Require-Contains $acceptance 'SKY_FLOW_SPEED = 0.1500' 'M6 reviewed background-flow speed'
+Require-Contains $acceptance 'doubles the baseline procedural-star count' 'M6 doubled star-catalogue occupancy rule'
 Require-Contains $acceptance 'random direction once per screensaver launch' 'M6 seeded sky-direction rule'
 Require-Contains $acceptance 'must not rotate around the' 'M6 non-orbital background rule'
 Require-Contains $acceptance 'reversed secondary image may move locally opposite' 'M6 lensed parity-motion allowance'
@@ -293,10 +293,11 @@ Require-Contains $acceptance 'entry/exit flash' 'M6 lensed-star seam-flicker rul
 Require-Contains $acceptance 'apparent size and must not disappear' 'M6 unchanged-star visual criterion'
 Require-Contains $acceptance '4.00 * B_CRIT' 'M6 weak-lensing outer blend acceptance'
 Require-Contains $acceptance 'without a hard circular transition' 'M6 weak-lensing continuity acceptance'
-Require-Contains $acceptance 'three candidate analytic impact arcs' 'M6 bounded impact-arc count'
-Require-Contains $acceptance 'no 36-second global macro replay' 'M6 no global material replay'
-Require-Contains $acceptance 'visibly radius-dependent shear' 'M6 impact-arc shear acceptance'
-Require-Contains $acceptance 'drift inward, and fade independently' 'M6 impact-arc lifecycle acceptance'
+Require-Contains $acceptance 'continuous wrapped procedural filaments' 'M6 continuous disk-material rule'
+Require-Contains $acceptance 'clumps or impact-arc events' 'M6 no-discrete-material-events rule'
+Require-Contains $acceptance 'Derivative-free footprint filtering' 'M6 continuous-material anti-moire rule'
+Require-Contains $acceptance 'bounded differential shear' 'M6 bounded filament-shear rule'
+Require-Contains $acceptance 'must not accumulate into an increasingly dense' 'M6 long-run filament-stability rule'
 Require-Contains $acceptance 'finite analytic body with a constant half-thickness' 'M6 slim-disk geometry'
 Require-Contains $acceptance 'does not subdivide or consume the fixed 48-step geodesic budget' 'M6 slim-disk fixed-step preservation'
 Require-Contains $acceptance 'exit does not double emission or opacity' 'M6 slim-disk entry-only integration'
@@ -343,17 +344,10 @@ Require-Contains $shaderText 'vec3 gasdir=normalize(cross(n,diskPoint))*sdir;' '
 Require-Contains $shaderText 'xPrev=x;' 'Slim-disk contiguous-chord tracking'
 Require-NotContains $shaderText 'dt=min(dt,1.10*min(tHeight,tRim));' 'Rejected boundary substepping'
 Require-NotContains $shaderText 's*sPrev<0.0' 'Rejected infinitesimal disk-plane crossing'
-Require-Contains $shaderText 'const float IMPACT_ARC_SLOT_SECONDS = 11.0000;' 'Impact-arc stagger interval'
-Require-Contains $shaderText 'const float IMPACT_ARC_LIFETIME_MIN = 18.0000;' 'Impact-arc minimum lifetime'
-Require-Contains $shaderText 'const float IMPACT_ARC_LIFETIME_MAX = 22.0000;' 'Impact-arc maximum lifetime'
-Require-Contains $shaderText 'const float IMPACT_ARC_INFLOW_RATE = 0.0100;' 'Impact-arc inward drift rate'
-Require-Contains $shaderText 'float diskImpactArc(' 'Deterministic impact-arc descriptor'
-Require-Contains $shaderText 'float birthCoordinate=radial*exp(IMPACT_ARC_INFLOW_RATE*max(age,0.0));' 'Impact-arc birth-coordinate inward drift'
-Require-Contains $shaderText 'float orbitalPhase=hPhase-age*DISK_MATERIAL_RATE*abs(materialSpeed)*0.12*sampleKep*sampleGloc*sdir;' 'Impact-arc birth-radius differential shear'
-Require-Contains $shaderText 'float impactArcExcess=diskImpactArc(rc,turns,rin,rout,b,W,sdir,abs(L.speed),impactSlot)' 'First impact-arc descriptor'
-Require-Contains $shaderText '+diskImpactArc(rc,turns,rin,rout,b,W,sdir,abs(L.speed),impactSlot-1.0)' 'Second impact-arc descriptor'
-Require-Contains $shaderText '+diskImpactArc(rc,turns,rin,rout,b,W,sdir,abs(L.speed),impactSlot-2.0);' 'Third impact-arc descriptor'
-Require-Contains $shaderText 'float density=band*streaks*impactArcDensity;' 'Impact-arc density consumption'
+Require-Contains $shaderText 'float density=band*streaks;' 'Continuous filament density consumption'
+foreach ($removedMaterialToken in @('IMPACT_ARC_', 'diskImpactArc', 'impactSlot', 'impactArcExcess', 'impactArcDensity', 'uSceneSeed')) {
+    Require-NotContains $shaderText $removedMaterialToken 'Removed discrete impact-arc material path'
+}
 Require-NotContains $shaderText 'MACRO_CYCLE_SEC' 'Rejected synchronized macro replay'
 Require-NotContains $shaderText 'MACRO_FADE_SEC' 'Rejected synchronized macro fade'
 Require-NotContains $shaderText 'diskMacroDensity' 'Rejected macro density helper'
@@ -369,20 +363,26 @@ Require-Contains $shaderText 'sky*=innerFlowSkyTransmission;' 'M6 sky-only inner
 Require-Contains $shaderText 'vec3 col=sky*trans+(vec3(1.0)-exp(-emitc*L.expo));' 'M6 disk emission preserved after sky occlusion'
 Require-Contains $shaderText 'float lensBlend=1.0-smoothstep(B_CRIT*1.35,B_CRIT*4.00,b);' 'Extended weak-lensing blend range'
 Require-Contains $shaderText 'float bmax=rout+3.0;' 'Existing outer lens trace boundary'
-Require-Contains $shaderText 'const float SKY_FLOW_SPEED = 0.0750;' 'Reviewed visible background-flow speed'
+Require-Contains $shaderText 'const float SKY_FLOW_SPEED = 0.1500;' 'Reviewed doubled background-flow speed'
 Require-Contains $shaderText 'const float SKY_FLOW_DISTANCE_PER_PHASE = 0.2247;' 'Reviewed world-sky flow distance'
-Require-Contains $shaderText 'vec2 streakA=vec2(rc*2.8,turns*19.0+swirl*3.0);' 'Restored primary disk filament band'
-Require-Contains $shaderText 'vec2 streakB=vec2(rc*1.0,turns*9.0+swirl*1.5+7.0);' 'Restored secondary disk filament band'
-Require-Contains $shaderText 'float streaks=filteredVnoiseWrapY(streakA,19.0,footprintA)*0.65' 'Restored disk filament density'
+Require-Contains $shaderText 'field+=cellStars(skyTangent,10.0,0.400,3.0,core*1.18,gatherNeighbors);' 'Doubled first star-catalogue occupancy'
+Require-Contains $shaderText 'field+=cellStars(skyTangent,17.0,0.680,19.0,core*0.92,gatherNeighbors);' 'Doubled second star-catalogue occupancy'
+Require-Contains $shaderText 'field+=cellStars(skyTangent,27.0,0.840,43.0,core*0.72,gatherNeighbors);' 'Doubled third star-catalogue occupancy'
+Require-Contains $shaderText 'field+=cellStars(skyTangent,41.0,0.920,71.0,core*0.58,gatherNeighbors);' 'Doubled fourth star-catalogue occupancy'
+Require-Contains $shaderText 'const float DISK_FILAMENT_FLOW_RATE = 0.0500;' 'Continuous filament flow rate'
+Require-Contains $shaderText 'const float DISK_FILAMENT_SHEAR_RATE = 0.0350;' 'Bounded filament-shear rate'
+Require-Contains $shaderText 'const float DISK_FILAMENT_SHEAR_AMPLITUDE = 0.3500;' 'Bounded filament-shear amplitude'
+Require-Contains $shaderText 'float filamentFlowPhase=iTime*DISK_FILAMENT_FLOW_RATE*abs(L.speed);' 'Continuous filament flow phase'
+Require-Contains $shaderText 'float filamentShearPulse=sin(iTime*DISK_FILAMENT_SHEAR_RATE)*DISK_FILAMENT_SHEAR_AMPLITUDE;' 'Bounded filament-shear pulse'
+Require-Contains $shaderText 'float boundedShear=filamentShearPulse*kep*gloc*dil;' 'Radius-dependent bounded filament shear'
+Require-Contains $shaderText 'vec2 streakA=vec2(rc*1.8,turns*11.0+swirl*1.20);' 'Sparse primary disk filament band'
+Require-Contains $shaderText 'vec2 streakB=vec2(rc*0.7,turns*5.0+swirl*0.70+7.0);' 'Sparse secondary disk filament band'
+Require-Contains $shaderText 'float streaks=filteredVnoiseWrapY(streakA,11.0,footprintA)*0.70' 'Sparse continuous disk filament density'
+Require-NotContains $shaderText 'rotationPhase=iTime*DISK_MATERIAL_RATE' 'Rejected unbounded filament shear phase'
 Require-NotContains $shaderText 'STAR_LENS_FILTER_GAIN' 'Rejected lensed-star softening filter'
 foreach ($legacyToken in @('DEMO_N', 'DEMO_TOUR', 'demoLook', 'demoSize', 'mixLook', 'sceneAt', 'lissa', 'DRIFT_SPEED')) {
     Require-NotContains $shaderText $legacyToken 'Legacy body-presentation path'
 }
-if ([regex]::Matches($shaderText, '\buSceneSeed\b', [System.Text.RegularExpressions.RegexOptions]::CultureInvariant).Count -ne 8) {
-    Fail 'uSceneSeed must be restricted to the uniform and seven impact-arc seed hashes'
-}
-$impactArcBlock = Get-GlslFunctionBlock $shaderText 'diskImpactArc'
-Require-Contains $impactArcBlock 'uSceneSeed' 'Material-only scene seed use'
 foreach ($forbiddenShaderToken in @('fwidth', 'dFdx', 'dFdy', 'sampler2D')) {
     Require-NotContains $shaderText $forbiddenShaderToken 'Derivative-free single-pass shader'
 }

@@ -1,10 +1,10 @@
 {
   "contract": "blackhole-screensaver-milestone-6",
-  "version": 4,
-  "scope": "named-static-schwarzschild-scene-with-impact-arcs-and-slim-disk",
+  "version": 5,
+  "scope": "named-static-schwarzschild-scene-with-slim-disk",
   "canonicalShader": {
     "path": "blackhole_screensaver.glsl",
-    "sourceSha256": "8E188F863CA4EC4FEEE1A1D71ACA124E94EAEB4AAC2BCD8147ED71A7AA803D37",
+    "sourceSha256": "A8F4CA12DE8E745F9C36289A9569F104CB85F7316128831330C614D7BFE1707B",
     "generator": "tools/generate-shader-include.ps1",
     "generatedInclude": "generated/blackhole_screensaver_frag.inc"
   },
@@ -44,9 +44,10 @@
   },
   "relativeMotion": {
     "bodyComposition": "fixed",
-    "backgroundSkyFlowSpeed": 0.075,
+    "backgroundSkyFlowSpeed": 0.150,
     "backgroundMapping": "seeded-random-world-direction-translation",
     "flowDistancePerPhase": 0.2247,
+    "catalogueOccupancy": [0.60, 0.32, 0.16, 0.08],
     "directionSeed": "uSkySeed",
     "directionLifetime": "one-direction-per-screensaver-launch"
   },
@@ -87,21 +88,16 @@
     "scope": "sky-only",
     "diskEmission": "preserved"
   },
-  "impactArcMaterial": {
-    "model": "three-staggered-deterministic-disk-space-impact-arcs",
-    "materialSeed": "uSceneSeed",
-    "descriptorState": "reconstructed-from-time-and-seed",
-    "candidateCount": 3,
-    "slotSeconds": 11.0,
-    "lifetimeSeconds": [18.0, 22.0],
-    "inflow": "exponential-inward",
-    "inflowRate": 0.0100,
-    "differentialShear": "birth-radius-dependent-kepler-like-phase",
-    "birthRadialRange": [0.34, 0.82],
-    "birthAngularHalfTurnsRange": [0.010, 0.020],
-    "globalMacroReplay": "forbidden",
-    "baseDisk": "continuous-wrapped-filaments",
-    "rendering": "bounded-density-modulation-at-slim-disk-entry"
+  "filamentMaterial": {
+    "model": "continuous-bounded-shear-wrapped-filaments",
+    "flowRate": 0.0500,
+    "shearRate": 0.0350,
+    "shearAmplitude": 0.3500,
+    "layers": [
+      { "radialScale": 1.8, "angularPeriod": 11.0, "swirlScale": 1.20, "weight": 0.70 },
+      { "radialScale": 0.7, "angularPeriod": 5.0, "swirlScale": 0.70, "weight": 0.30 }
+    ],
+    "unboundedPhaseAccumulation": "forbidden"
   },
   "slimDiskGeometry": {
     "model": "analytic-finite-constant-thickness-disk-body",

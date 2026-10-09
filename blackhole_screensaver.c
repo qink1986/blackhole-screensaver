@@ -103,7 +103,6 @@ typedef struct SceneState {
     GLfloat starGain;
     GLfloat diskOpacity;
     GLfloat doppler;
-    GLfloat sceneSeed;
     GLfloat skySeed;
     StaticSchwarzschildScene scene;
 } SceneState;
@@ -112,7 +111,6 @@ static GLsync g_frameFence;
 static ULONGLONG g_frameSubmitTick;
 static ULONGLONG g_nextFrameEligibleTick;
 static int g_frameSyncReady;
-static GLfloat g_sceneSeed;
 static GLfloat g_skySeed;
 // Set only for the automated M6 OpenGL smoke. Production runs ignore this
 // entirely unless the test process explicitly supplies a named event.
@@ -234,7 +232,7 @@ static PFNGLCLIENTWAITSYNCPROC      p_glClientWaitSync;
 static PFNGLDELETESYNCPROC          p_glDeleteSync;
 
 static GLuint shaderProgram;
-static GLint  uTime = -1, uResolution = -1, uStarGain = -1, uDiskOpacity = -1, uDoppler = -1, uSceneSeed = -1, uSkySeed = -1;
+static GLint  uTime = -1, uResolution = -1, uStarGain = -1, uDiskOpacity = -1, uDoppler = -1, uSkySeed = -1;
 static GLint  uSceneCenter = -1, uApparentRadius = -1, uDiskLookA = -1, uDiskLookB = -1, uDiskLookC = -1, uSceneExposure = -1;
 static GLuint vao;
 
@@ -358,7 +356,6 @@ static int initShader(void) {
     uStarGain   = glGetUniformLocation(shaderProgram, "uStarGain");
     uDiskOpacity= glGetUniformLocation(shaderProgram, "uDiskOpacity");
     uDoppler    = glGetUniformLocation(shaderProgram, "uDoppler");
-    uSceneSeed  = glGetUniformLocation(shaderProgram, "uSceneSeed");
     uSkySeed    = glGetUniformLocation(shaderProgram, "uSkySeed");
     uSceneCenter = glGetUniformLocation(shaderProgram, "uSceneCenter");
     uApparentRadius = glGetUniformLocation(shaderProgram, "uApparentRadius");
@@ -776,7 +773,6 @@ static SceneState makeSceneState(ULONGLONG now) {
     state.starGain = (float)cfg_starBrightness / 100.0f;
     state.diskOpacity = (float)cfg_diskOpacity / 100.0f;
     state.doppler = (float)cfg_doppler / 100.0f;
-    state.sceneSeed = g_sceneSeed;
     state.skySeed = g_skySeed;
     state.scene = STATIC_SCHWARZSCHILD;
     return state;
@@ -788,9 +784,6 @@ static void uploadSceneState(const SceneState* state) {
     if (uStarGain >= 0)    glUniform1f(uStarGain, state->starGain);
     if (uDiskOpacity >= 0) glUniform1f(uDiskOpacity, state->diskOpacity);
     if (uDoppler >= 0)     glUniform1f(uDoppler, state->doppler);
-    if (uSceneSeed >= 0)   glUniform1f(uSceneSeed, state->sceneSeed);
-    // sceneSeed controls only deterministic disk-material impact events. The
-    // static scene never reads it for center, radius, inclination, roll, or look.
     if (uSkySeed >= 0)     glUniform1f(uSkySeed, state->skySeed);
     if (uSceneCenter >= 0) glUniform2f(uSceneCenter, state->scene.centerX, state->scene.centerY);
     if (uApparentRadius >= 0) glUniform1f(uApparentRadius, state->scene.apparentRadius);
@@ -1000,10 +993,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmdLine, int show
         return 1;
     }
 
-    // Separate immutable run seeds are owned by the host. The active shader
-    // uses skySeed for its per-launch catalogue, offset, and flow direction;
-    // sceneSeed selects only deterministic disk-material impact events.
-    g_sceneSeed = makeSceneSeed();
+    // The sky catalogue, offset, and straight flow direction are seeded once
+    // per screensaver launch. The fixed scene has no material-event seed.
     g_skySeed = makeSceneSeed();
     if (!initShader()) {
         shutdownRenderer();

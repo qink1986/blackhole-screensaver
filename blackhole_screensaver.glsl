@@ -5,7 +5,6 @@ uniform vec2  iResolution;
 uniform float uStarGain;
 uniform float uDiskOpacity;
 uniform float uDoppler;
-uniform float uSceneSeed;
 uniform float uSkySeed;
 uniform vec2 uSceneCenter;
 uniform float uApparentRadius;
@@ -17,9 +16,14 @@ uniform float uSceneExposure;
 // --- static-scene and rendering tunables ---
 const float LENS_DEPTH    = 13.0000;
 const float DISK_MATERIAL_RATE = 0.2500;
+// Continuous filaments flow in one direction, while their radius-dependent
+// shear remains bounded instead of accumulating into unresolved winding.
+const float DISK_FILAMENT_FLOW_RATE = 0.0500;
+const float DISK_FILAMENT_SHEAR_RATE = 0.0350;
+const float DISK_FILAMENT_SHEAR_AMPLITUDE = 0.3500;
 // Deliberately visible world-direction translation, independent of the body.
 // uSkySeed selects one fixed random direction for each screensaver launch.
-const float SKY_FLOW_SPEED = 0.0750;
+const float SKY_FLOW_SPEED = 0.1500;
 const float SKY_FLOW_DISTANCE_PER_PHASE = 0.2247;
 const float WORK_AREA     = 0.0;
 const float DISK_LOD_CRITICAL_GAIN = 150.0000;
@@ -27,15 +31,6 @@ const float DISK_LOD_CRITICAL_GAIN = 150.0000;
 // Its contact query never consumes extra geodesic steps.
 const float DISK_HALF_THICKNESS = 0.0350;
 const float DISK_CONTACT_PROBE_DISTANCE = 0.0060;
-// A fixed number of deterministic material events replace the synchronized
-// macro replay. These are disk-space impact arcs, not particles or fluid state.
-const float IMPACT_ARC_SLOT_SECONDS = 11.0000;
-const float IMPACT_ARC_LIFETIME_MIN = 18.0000;
-const float IMPACT_ARC_LIFETIME_MAX = 22.0000;
-const float IMPACT_ARC_INFLOW_RATE = 0.0100;
-const float IMPACT_ARC_LOD_START = 0.1200;
-const float IMPACT_ARC_LOD_END = 0.7000;
-const float IMPACT_ARC_DENSITY_MAX = 1.72;
 // Ray-space silhouette of the non-emissive inner inflow between the photon
 // ring and visible disk. It blocks only background, never disk emission.
 const float INNER_FLOW_SKY_OCCLUDER_START = 1.4200;
@@ -104,41 +99,6 @@ float diskBodyEntry(vec3 x0,vec3 x1,vec3 normal,float rout){
     }
   }
   return entry;
-}
-// Each impact descriptor is reconstructed from its slot index and the
-// per-launch material seed. A birth-coordinate radial test makes the feature
-// drift inward while phase evaluated at that coordinate supplies shear.
-float diskImpactArc(float rc,float turns,float rin,float rout,float b,float W,float sdir,float materialSpeed,float eventIndex){
-  float hBirth=hash21(vec2(uSceneSeed*17.0,eventIndex+11.0));
-  float hRadius=hash21(vec2(uSceneSeed*29.0,eventIndex+23.0));
-  float hPhase=hash21(vec2(uSceneSeed*43.0,eventIndex+37.0));
-  float hWidth=hash21(vec2(uSceneSeed*59.0,eventIndex+47.0));
-  float hLife=hash21(vec2(uSceneSeed*71.0,eventIndex+61.0));
-  float birthTime=eventIndex*IMPACT_ARC_SLOT_SECONDS
-                 +mix(0.12,0.78,hBirth)*IMPACT_ARC_SLOT_SECONDS;
-  float age=iTime-birthTime;
-  float lifetime=mix(IMPACT_ARC_LIFETIME_MIN,IMPACT_ARC_LIFETIME_MAX,hLife);
-  float birth=smoothstep(0.0,1.50,age);
-  float dissipation=1.0-smoothstep(lifetime-4.50,lifetime,age);
-  float life=birth*dissipation*step(0.0,age);
-  float radial=clamp((rc-rin)/max(rout-rin,0.5),0.0,1.0);
-  float birthRadius=mix(0.34,0.82,hRadius);
-  float birthCoordinate=radial*exp(IMPACT_ARC_INFLOW_RATE*max(age,0.0));
-  float sampleRadius=rin+birthCoordinate*(rout-rin);
-  float sampleKep=pow(rin/max(sampleRadius,rin),1.5);
-  float sampleGloc=sqrt(max(1.0-1.5/max(sampleRadius,1.6),0.02));
-  float orbitalPhase=hPhase-age*DISK_MATERIAL_RATE*abs(materialSpeed)*0.12*sampleKep*sampleGloc*sdir;
-  float radialWidth=mix(0.035,0.065,hWidth);
-  float angularWidth=mix(0.010,0.020,hash21(vec2(uSceneSeed*83.0,eventIndex+73.0)));
-  float turnDelta=fract(turns-orbitalPhase+0.5)-0.5;
-  vec2 local=vec2((birthCoordinate-birthRadius)/radialWidth,turnDelta/angularWidth);
-  float arc=1.0-smoothstep(1.0,1.32,length(local));
-  float radialScale=1.0/(max(rout-rin,0.5)*radialWidth);
-  float phaseScale=1.0/max(angularWidth,0.003);
-  float footprint=diskNoiseFootprint(radialScale,phaseScale,0.0,rc,0.0,b,W);
-  float resolved=1.0-smoothstep(IMPACT_ARC_LOD_START,IMPACT_ARC_LOD_END,footprint);
-  float amplitude=mix(0.28,0.52,hash21(vec2(uSceneSeed*97.0,eventIndex+89.0)));
-  return life*resolved*arc*amplitude;
 }
 vec2 rot(vec2 v,float a){float c=cos(a),s=sin(a);return vec2(c*v.x-s*v.y,s*v.x+c*v.y);}
 vec3 blackbody(float T){
@@ -231,10 +191,10 @@ vec3 stars(vec3 worldDir,float gatherNeighbors){
   vec3 field=vec3(0.0);
   // Four stochastic layers provide a denser deep field without changing the
   // size or energy of an individual catalogue star.
-  field+=cellStars(skyTangent,10.0,0.700,3.0,core*1.18,gatherNeighbors);
-  field+=cellStars(skyTangent,17.0,0.840,19.0,core*0.92,gatherNeighbors);
-  field+=cellStars(skyTangent,27.0,0.920,43.0,core*0.72,gatherNeighbors);
-  field+=cellStars(skyTangent,41.0,0.960,71.0,core*0.58,gatherNeighbors);
+  field+=cellStars(skyTangent,10.0,0.400,3.0,core*1.18,gatherNeighbors);
+  field+=cellStars(skyTangent,17.0,0.680,19.0,core*0.92,gatherNeighbors);
+  field+=cellStars(skyTangent,27.0,0.840,43.0,core*0.72,gatherNeighbors);
+  field+=cellStars(skyTangent,41.0,0.920,71.0,core*0.58,gatherNeighbors);
   float angle=6.2831853*hash21(vec2(uSkySeed*43.0,23.0));
   vec2 offset=(vec2(hash21(vec2(uSkySeed*53.0,11.0)),
                     hash21(vec2(uSkySeed*61.0,31.0)))-0.5)*0.13;
@@ -278,7 +238,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     uSceneExposure,0.0);
   L.opac=clamp(L.opac*clamp(uDiskOpacity,0.0,1.0)/0.90,0.0,1.0);
   L.dopp=clamp(L.dopp*clamp(uDoppler,0.0,1.0)/0.60,0.0,1.0);
-  float rotationPhase=iTime*DISK_MATERIAL_RATE*abs(L.speed);
+  float filamentFlowPhase=iTime*DISK_FILAMENT_FLOW_RATE*abs(L.speed);
+  float filamentShearPulse=sin(iTime*DISK_FILAMENT_SHEAR_RATE)*DISK_FILAMENT_SHEAR_AMPLITUDE;
   float rin=max(L.inner,1.6),rout=max(L.outer,rin+0.5);
   float rh=uApparentRadius;
   vec2 center=uSceneCenter;
@@ -320,33 +281,32 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         float band=smoothstep(rin,rin*1.25,rc)*(1.0-smoothstep(rout*0.70,rout,rc));
         float phi=atan(dot(diskPoint,e2),diskPoint.x),turns=phi/6.2831853,kep=pow(rin/rc,1.5);
         float gloc=sqrt(max(1.0-1.5/rc,0.02));
-        float swirl=rc*L.wind*0.12-rotationPhase*kep*gloc*dil*sdir;
-        vec2 streakA=vec2(rc*2.8,turns*19.0+swirl*3.0);
-        vec2 streakB=vec2(rc*1.0,turns*9.0+swirl*1.5+7.0);
+        // A shared directional flow keeps the filament field coherent. Only a
+        // bounded radial pulse shears it, preventing old material from winding
+        // into an ever-denser unresolved sheet during long screensaver runs.
+        float boundedShear=filamentShearPulse*kep*gloc*dil;
+        float swirl=rc*L.wind*0.12-(filamentFlowPhase+boundedShear)*sdir;
+        vec2 streakA=vec2(rc*1.8,turns*11.0+swirl*1.20);
+        vec2 streakB=vec2(rc*0.7,turns*5.0+swirl*0.70+7.0);
         float dKep=-1.5*kep/rc;
         float dGloc=0.75/(rc*rc*max(gloc,1e-3));
-        float dSwirl=0.12*L.wind-rotationPhase*dil*sdir*(dKep*gloc+kep*dGloc);
-        float footprintA=diskNoiseFootprint(2.8,19.0,3.0,rc,dSwirl,b,W);
-        float footprintB=diskNoiseFootprint(1.0,9.0,1.5,rc,dSwirl,b,W);
+        float dSwirl=0.12*L.wind-filamentShearPulse*dil*sdir*(dKep*gloc+kep*dGloc);
+        float footprintA=diskNoiseFootprint(1.8,11.0,1.20,rc,dSwirl,b,W);
+        float footprintB=diskNoiseFootprint(0.7,5.0,0.70,rc,dSwirl,b,W);
         float innerRing=1.0-smoothstep(1.15*rin,1.70*rin,rc);
         float partialUnresolved=smoothstep(0.15,0.45,max(footprintA,footprintB));
         float ringLodBoost=1.0+1.25*innerRing*partialUnresolved;
         footprintA*=ringLodBoost;footprintB*=ringLodBoost;
-        float streaks=filteredVnoiseWrapY(streakA,19.0,footprintA)*0.65
-                     +filteredVnoiseWrapY(streakB,9.0,footprintB)*0.35;
-        streaks=0.35+L.contr*streaks*streaks;
-        float impactSlot=floor(iTime/IMPACT_ARC_SLOT_SECONDS);
-        float impactArcExcess=diskImpactArc(rc,turns,rin,rout,b,W,sdir,abs(L.speed),impactSlot)
-                            +diskImpactArc(rc,turns,rin,rout,b,W,sdir,abs(L.speed),impactSlot-1.0)
-                            +diskImpactArc(rc,turns,rin,rout,b,W,sdir,abs(L.speed),impactSlot-2.0);
-        float impactArcDensity=clamp(1.0+impactArcExcess,1.0,IMPACT_ARC_DENSITY_MAX);
+        float streaks=filteredVnoiseWrapY(streakA,11.0,footprintA)*0.70
+                     +filteredVnoiseWrapY(streakB,5.0,footprintB)*0.30;
+        streaks=0.58+0.58*L.contr*streaks*streaks;
         vec3 gasdir=normalize(cross(n,diskPoint))*sdir;
         float beta=clamp(inversesqrt(max(2.0*(rc-1.0),0.2)),0.0,0.99);
         float g2=gloc/max(1.0+beta*dot(gasdir,normalize(v)),0.05);g2=mix(1.0,g2,L.dopp);
         float xpr=max(1.0-sqrt(rin/rc),0.0);
         float tprof=pow(rin/rc,0.75)*pow(xpr,0.25)/0.488;
         vec3 cbb=blackbody(L.temp*tprof*g2);float boost=pow(g2,L.beam);
-        float density=band*streaks*impactArcDensity;
+        float density=band*streaks;
         emitc+=trans*cbb*(L.gain*2.2*density*tprof*tprof*boost);
         trans*=1.0-clamp(L.opac*density,0.0,1.0);
     }}

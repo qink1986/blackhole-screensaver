@@ -181,7 +181,7 @@ Use the intended target display and driver. At a minimum:
 4. Confirm the layered star field and compact clusters remain visible without
    overwhelming the disk at the default star-brightness setting.
 5. Check the disk's inner bright ring and filaments for a regression in moire,
-   discontinuities, flicker, or loss of the existing broad clumps/gaps.
+   discontinuities, flicker, or loss of the existing broad density variation/gaps.
 6. Test /p with a valid preview host, /c open/close without an unintended write,
    and /d or /s exit through normal keyboard/mouse behavior.
 7. Repeat a representative test on the intended Intel integrated GPU and, when
