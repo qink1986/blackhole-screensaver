@@ -1,0 +1,66 @@
+{
+  "contract": "blackhole-screensaver-milestone-9",
+  "version": 1,
+  "scope": "host-owned-discrete-schwarzschild-scene-catalog",
+  "canonicalShader": {
+    "path": "blackhole_screensaver.glsl",
+    "generatedInclude": "generated/blackhole_screensaver_frag.inc",
+    "sourceSha256": "C0B0BCA007D0E9726BAA169BDD178DEC2D2D827C6F0B9FCDE7D07669520749A3"
+  },
+  "sceneLifecycle": {
+    "durationMilliseconds": 45000,
+    "transition": "hard-cut-at-fixed-boundary",
+    "statePolicy": "host-owned-active-scene-immutable-within-interval",
+    "diskTime": "run-relative-continuous"
+  },
+  "catalog": {
+    "inclinationsRadians": [0.0000000, 0.3926991, 0.7853982, 1.1780972, 1.5707963],
+    "positions": [[0.33, 0.33], [0.50, 0.33], [0.66, 0.33], [0.33, 0.50], [0.50, 0.50], [0.66, 0.50], [0.33, 0.66], [0.50, 0.66], [0.66, 0.66]],
+    "apparentRadii": [0.1000, 0.1175, 0.1350],
+    "skyDirectionCount": 8,
+    "catalogSize": 1080,
+    "selection": "random-cyclic-offset-over-discrete-full-catalog",
+    "consecutiveScenes": "inclination-position-radius-and-direction-all-differ",
+    "cyclePolicy": "every-descriptor-once-per-cycle-and-cycle-boundary-differs"
+  },
+  "baselineScene": {
+    "temperature": 5500.0,
+    "innerRadius": 1.80,
+    "outerRadius": 8.00,
+    "baselineOpacity": 0.90,
+    "baselineDoppler": 0.60,
+    "beam": 2.50,
+    "gain": 2.20,
+    "contrast": 1.60,
+    "wind": 7.00,
+    "materialSpeed": 5.00,
+    "exposure": 1.40
+  },
+  "sky": {
+    "layoutSeed": "deterministic-per-descriptor-and-launch-seed",
+    "flowDirection": "one-of-eight-unit-compass-directions-per-active-scene",
+    "userDensityPolicy": "persisted-m7-baseline-clamped-0.5-to-2.0",
+    "userSpeedPolicy": "persisted-m7-0-to-5-velocity-only"
+  },
+  "retained": {
+    "glslVersion": 330,
+    "drawCall": "glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)",
+    "drawCallCount": 1,
+    "geodesicSteps": 48,
+    "frameFence": "one-frame",
+    "forbiddenTokens": ["glTex", "sampler2D", "glGenFramebuffers", "glBindFramebuffer", "DesktopSnapshot", "captureDesktop", "BitBlt", "fwidth", "dFdx", "dFdy"]
+  },
+  "configuration": {
+    "schemaVersion": 3,
+    "addedSettings": 0,
+    "preservedSettings": [
+      { "registry": "StarBrightness", "range": [0, 100], "default": 30 },
+      { "registry": "DiskOpacity", "range": [0, 100], "default": 90 },
+      { "registry": "Doppler", "range": [0, 100], "default": 60 },
+      { "registry": "StarDensity", "range": [50, 200], "default": 100 },
+      { "registry": "SkyFlowSpeed", "range": [0, 500], "default": 100 }
+    ],
+    "legacySchemaVersions": [1, 2],
+    "settingsWindow": "BlackHoleSettings"
+  }
+}

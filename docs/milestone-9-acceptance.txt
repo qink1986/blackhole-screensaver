@@ -1,0 +1,70 @@
+M9 acceptance: discrete Schwarzschild scene catalogue
+======================================================
+
+Purpose
+-------
+M9 replaces M8's continuous scene ranges with a finite, host-owned catalogue.
+A scene remains immutable for one 45-second interval, then changes by an
+intentional hard cut. Each switch changes black-hole inclination, screen
+position, apparent size, and straight sky-flow direction together.
+
+Discrete catalogue
+------------------
+- **Inclination:** five polar angles of the disk normal, in radians:
+  `0`, `pi/8`, `pi/4`, `3*pi/8`, and `pi/2`. They span north-pole/face-on to
+  the explicitly approved equatorial/edge-on view. `pi/2` is a visual endpoint,
+  not a camera orbit or a flip to the opposite disk face.
+- **Position:** nine exact screen centers from the Cartesian grid:
+  X and Y are each `0.33`, `0.50`, or `0.66`. The centered position is now
+  deliberately permitted.
+- **Apparent radius:** `0.1000`, `0.1175`, or `0.1350`.
+- **Sky flow:** one of eight normalized compass directions: east, north-east,
+  north, north-west, west, south-west, south, or south-east. It remains a
+  world-direction translation and never rotates around the black hole.
+- The Cartesian catalogue contains `5 * 9 * 3 * 8 = 1080` descriptors. Every
+  descriptor occurs exactly once in each cyclic traversal. A launch randomly
+  chooses the cyclic starting offset; no descriptor is sampled per frame.
+- Every adjacent pair, including the cycle boundary, differs in **all four**
+  requested dimensions: inclination, position, apparent radius, and sky-flow
+  direction.
+
+Scene lifecycle
+---------------
+- Every active scene lasts exactly 45 seconds (`M9_SCENE_DURATION_MS = 45000`).
+- The C host commits one complete `ActiveScene` at an interval boundary. The
+  `SceneState` snapshot and centralized uniform upload remain the only path to
+  the fullscreen shader draw.
+- A delayed render advances through each elapsed boundary before drawing. It
+  does not derive a pose from a frame-local remainder.
+- Transitions are intentional hard cuts: no crossfade, two simultaneous ray
+  traces, extra draw, or disk-time reset. Disk filaments retain their
+  run-relative analytic time.
+
+Sky and retained behavior
+-------------------------
+- The host derives a deterministic `uSkySeed` from the launch seed and the
+  selected descriptor. It affects only procedural sky layout, colours, and
+  clusters—not black-hole position, size, inclination, roll, or disk look.
+- The persisted M7 Star density setting is uploaded directly as its user
+  baseline; M9 adds no per-scene density multiplier, registry field, or
+  settings control. Sky flow speed remains the existing user-controlled speed
+  multiplier only.
+- OpenGL 3.3, one `glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)` per prepared frame,
+  the single 48-step geodesic loop, one-frame fence scheduling, canonical GLSL
+  embedding, and all texture/FBO/derivative prohibitions remain unchanged.
+
+Manual final M9 gate
+--------------------
+1. Run `blackhole.scr /s` through several 45-second cuts.
+2. At every observed cut, confirm that the black hole's inclination, exact grid
+   placement, apparent size, and straight sky-flow direction all change; none
+   may repeat from the immediately preceding scene.
+3. Confirm representative pole-on, intermediate, and exact edge-on disk views.
+   The edge-on view may be thin, but must retain a stable complete disk without
+   a flip, duplicated slab, or missing lensed backside.
+4. Confirm positions land on the visible 3-by-3 grid, including a deliberate
+   centered `(0.50, 0.50)` composition, with no within-interval drift.
+5. Confirm the sky changes as one hard-cut catalogue/direction change and then
+   translates straight, never orbiting the screen or moved black hole.
+6. Confirm `/c`, `/w`, `/p`, and `/s` preserve the existing configuration and
+   lifecycle behavior; no scene-catalogue controls may appear.

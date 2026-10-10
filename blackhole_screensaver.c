@@ -80,49 +80,70 @@ typedef struct StaticSchwarzschildScene {
     GLfloat exposure;
 } StaticSchwarzschildScene;
 
-// M8 keeps every scene inside this reviewed Schwarzschild-style look. Only
-// center, apparent radius, inclination, and roll are sampled at an interval boundary.
-static const StaticSchwarzschildScene M8_SCHWARZSCHILD_BASELINE = {
+// M9 uses a finite host-owned scene catalogue. Every descriptor retains the
+// reviewed Schwarzschild material look while varying only the approved view,
+// placement, apparent radius, and straight world-sky flow direction.
+static const StaticSchwarzschildScene M9_SCHWARZSCHILD_BASELINE = {
     0.50f, 0.50f, 0.120f,
     5500.0f, 1.50f, 0.35f, 1.80f, 8.00f,
     0.90f, 0.60f, 2.50f, 2.20f, 1.60f, 7.00f, 5.00f, 1.40f
 };
 
-#define M8_SCENE_DURATION_MS 45000ULL
-#define M8_OFF_CENTER_POSITION_SLOT_COUNT 4u
+#define M9_SCENE_DURATION_MS 45000ULL
+#define M9_INCLINATION_COUNT 5u
+#define M9_POSITION_COUNT 9u
+#define M9_APPARENT_RADIUS_COUNT 3u
+#define M9_SKY_DIRECTION_COUNT 8u
+#define M9_BASE_CATALOG_SIZE (M9_INCLINATION_COUNT * M9_POSITION_COUNT * M9_SKY_DIRECTION_COUNT)
+#define M9_SCENE_CATALOG_SIZE (M9_BASE_CATALOG_SIZE * M9_APPARENT_RADIUS_COUNT)
 
-typedef struct M8SceneRange {
-    GLfloat apparentRadiusMinimum;
-    GLfloat apparentRadiusMaximum;
-    GLfloat inclinationMinimum;
-    GLfloat inclinationMaximum;
-    GLfloat rollMinimum;
-    GLfloat rollMaximum;
-} M8SceneRange;
+typedef struct M9ScenePosition {
+    GLfloat centerX;
+    GLfloat centerY;
+} M9ScenePosition;
 
-typedef struct M8ScenePositionRange {
-    GLfloat centerXMinimum;
-    GLfloat centerXMaximum;
-    GLfloat centerYMinimum;
-    GLfloat centerYMaximum;
-} M8ScenePositionRange;
+typedef struct M9SkyFlowDirection {
+    GLfloat x;
+    GLfloat y;
+} M9SkyFlowDirection;
 
-// Inclination is the polar angle of the disk normal: 0 is the north pole and
-// pi/2 is the equator. The maximum stays strictly below pi/2, so a scene never
-// crosses to the opposite hemisphere or flips its visible disk face.
-static const M8SceneRange M8_NORTH_HEMISPHERE_RANGE = {
-    0.100f, 0.135f, 0.050f, 1.480f, 0.00f, 0.78f
+typedef struct M9SceneDescriptor {
+    unsigned int inclinationIndex;
+    unsigned int positionIndex;
+    unsigned int apparentRadiusIndex;
+    unsigned int skyDirectionIndex;
+} M9SceneDescriptor;
+
+// Inclination is the polar angle of the disk normal: 0 is north-pole/face-on
+// and pi/2 is the explicitly approved equatorial/edge-on fifth view.
+static const GLfloat M9_INCLINATIONS[M9_INCLINATION_COUNT] = {
+    0.0000000f, 0.3926991f, 0.7853982f, 1.1780972f, 1.5707963f
 };
 
-// Every approved placement slot excludes the screen center. This keeps the
-// near-polar compositions intentionally off-center while allowing bounded
-// random placement throughout the run.
-static const M8ScenePositionRange M8_OFF_CENTER_POSITION_SLOTS[M8_OFF_CENTER_POSITION_SLOT_COUNT] = {
-    { 0.30f, 0.42f, 0.33f, 0.47f },
-    { 0.58f, 0.70f, 0.33f, 0.47f },
-    { 0.30f, 0.42f, 0.53f, 0.67f },
-    { 0.58f, 0.70f, 0.53f, 0.67f }
+static const M9ScenePosition M9_POSITIONS[M9_POSITION_COUNT] = {
+    { 0.33f, 0.33f }, { 0.50f, 0.33f }, { 0.66f, 0.33f },
+    { 0.33f, 0.50f }, { 0.50f, 0.50f }, { 0.66f, 0.50f },
+    { 0.33f, 0.66f }, { 0.50f, 0.66f }, { 0.66f, 0.66f }
 };
+
+static const GLfloat M9_APPARENT_RADII[M9_APPARENT_RADIUS_COUNT] = {
+    0.1000f, 0.1175f, 0.1350f
+};
+
+// East, north-east, north, north-west, west, south-west, south, south-east.
+static const M9SkyFlowDirection M9_SKY_FLOW_DIRECTIONS[M9_SKY_DIRECTION_COUNT] = {
+    { 1.0000000f, 0.0000000f }, { 0.7071068f, 0.7071068f },
+    { 0.0000000f, 1.0000000f }, { -0.7071068f, 0.7071068f },
+    { -1.0000000f, 0.0000000f }, { -0.7071068f, -0.7071068f },
+    { 0.0000000f, -1.0000000f }, { 0.7071068f, -0.7071068f }
+};
+
+// These phase tables form a cyclic full catalogue: every 5*9*3*8 descriptor
+// occurs once, while any consecutive pair changes inclination, position,
+// apparent radius, and sky-flow direction.
+static const unsigned int M9_INCLINATION_PHASE_BY_DIRECTION[M9_SKY_DIRECTION_COUNT] = { 0u, 3u, 4u, 0u, 1u, 2u, 3u, 4u };
+static const unsigned int M9_POSITION_PHASE_BY_DIRECTION[M9_SKY_DIRECTION_COUNT] = { 0u, 2u, 3u, 4u, 5u, 6u, 7u, 8u };
+static const unsigned int M9_RADIUS_PHASE_BY_DIRECTION[M9_SKY_DIRECTION_COUNT] = { 0u, 2u, 0u, 1u, 2u, 0u, 1u, 2u };
 
 typedef struct ActiveScene {
     // Values are committed together at a scene boundary and are immutable
@@ -131,7 +152,7 @@ typedef struct ActiveScene {
     GLfloat skySeed;
     GLfloat skyFlowDirectionX;
     GLfloat skyFlowDirectionY;
-    GLfloat starDensityMultiplier;
+    unsigned int descriptorIndex;
     ULONGLONG startTick;
     ULONGLONG endTick;
 } ActiveScene;
@@ -157,6 +178,7 @@ static ULONGLONG g_frameSubmitTick;
 static ULONGLONG g_nextFrameEligibleTick;
 static int g_frameSyncReady;
 static DWORD g_sceneRandomState;
+static unsigned int g_sceneCatalogIndex;
 static ActiveScene g_activeScene;
 // Set only for the automated M6 OpenGL smoke. Production runs ignore this
 // entirely unless the test process explicitly supplies a named event.
@@ -376,12 +398,36 @@ static DWORD nextSceneRandomValue(void) {
     return g_sceneRandomState;
 }
 
-static GLfloat sceneRandomUnit(void) {
-    return (GLfloat)(nextSceneRandomValue() & 0x00ffffffu) * (1.0f / 16777216.0f);
+static M9SceneDescriptor sceneDescriptorAt(unsigned int catalogIndex) {
+    M9SceneDescriptor descriptor;
+    unsigned int inclinationCycle;
+    unsigned int positionCycle;
+    unsigned int radiusCycle;
+    unsigned int directionCycle;
+
+    directionCycle = catalogIndex % M9_SKY_DIRECTION_COUNT;
+    catalogIndex /= M9_SKY_DIRECTION_COUNT;
+    radiusCycle = catalogIndex % M9_APPARENT_RADIUS_COUNT;
+    catalogIndex /= M9_APPARENT_RADIUS_COUNT;
+    positionCycle = catalogIndex % M9_POSITION_COUNT;
+    inclinationCycle = catalogIndex / M9_POSITION_COUNT;
+    // The phase sequence is a cyclic enumeration of the whole Cartesian
+    // catalogue. A carry into radius, position, or inclination still changes
+    // every output dimension instead of recreating a near-identical scene.
+    descriptor.inclinationIndex = (inclinationCycle + M9_INCLINATION_PHASE_BY_DIRECTION[directionCycle]) % M9_INCLINATION_COUNT;
+    descriptor.positionIndex = (positionCycle + M9_POSITION_PHASE_BY_DIRECTION[directionCycle]) % M9_POSITION_COUNT;
+    descriptor.apparentRadiusIndex = (radiusCycle + M9_RADIUS_PHASE_BY_DIRECTION[directionCycle]) % M9_APPARENT_RADIUS_COUNT;
+    descriptor.skyDirectionIndex = directionCycle;
+    return descriptor;
 }
 
-static GLfloat sceneRandomRange(GLfloat minimum, GLfloat maximum) {
-    return minimum + (maximum - minimum) * sceneRandomUnit();
+static GLfloat sceneSkySeed(unsigned int descriptorIndex) {
+    DWORD value = (DWORD)(descriptorIndex + 1u) * 0x9e3779b9u;
+    value ^= g_sceneRandomState;
+    value ^= value >> 16;
+    value *= 0x7feb352du;
+    value ^= value >> 15;
+    return (GLfloat)(value & 0x00ffffffu) * (1.0f / 16777216.0f);
 }
 
 static void signalShaderSmokeReady(void) {
@@ -1029,26 +1075,23 @@ static int presentPreparedFrame(void) {
 }
 
 static void beginScene(ULONGLONG startTick) {
-    const M8SceneRange* range = &M8_NORTH_HEMISPHERE_RANGE;
-    const M8ScenePositionRange* position;
-    unsigned int positionIndex;
-    GLfloat skyFlowAngle;
+    M9SceneDescriptor descriptor = sceneDescriptorAt(g_sceneCatalogIndex);
+    const M9ScenePosition* position = &M9_POSITIONS[descriptor.positionIndex];
+    const M9SkyFlowDirection* direction = &M9_SKY_FLOW_DIRECTIONS[descriptor.skyDirectionIndex];
 
-    positionIndex = nextSceneRandomValue() % M8_OFF_CENTER_POSITION_SLOT_COUNT;
-    position = &M8_OFF_CENTER_POSITION_SLOTS[positionIndex];
-    g_activeScene.scene = M8_SCHWARZSCHILD_BASELINE;
-    g_activeScene.scene.centerX = sceneRandomRange(position->centerXMinimum, position->centerXMaximum);
-    g_activeScene.scene.centerY = sceneRandomRange(position->centerYMinimum, position->centerYMaximum);
-    g_activeScene.scene.apparentRadius = sceneRandomRange(range->apparentRadiusMinimum, range->apparentRadiusMaximum);
-    g_activeScene.scene.inclination = sceneRandomRange(range->inclinationMinimum, range->inclinationMaximum);
-    g_activeScene.scene.roll = sceneRandomRange(range->rollMinimum, range->rollMaximum);
-    g_activeScene.skySeed = sceneRandomUnit();
-    skyFlowAngle = sceneRandomRange(0.0f, 6.28318530718f);
-    g_activeScene.skyFlowDirectionX = cosf(skyFlowAngle);
-    g_activeScene.skyFlowDirectionY = sinf(skyFlowAngle);
-    g_activeScene.starDensityMultiplier = sceneRandomRange(0.85f, 1.15f);
+    g_activeScene.scene = M9_SCHWARZSCHILD_BASELINE;
+    g_activeScene.scene.centerX = position->centerX;
+    g_activeScene.scene.centerY = position->centerY;
+    g_activeScene.scene.apparentRadius = M9_APPARENT_RADII[descriptor.apparentRadiusIndex];
+    g_activeScene.scene.inclination = M9_INCLINATIONS[descriptor.inclinationIndex];
+    g_activeScene.scene.roll = 0.00f;
+    g_activeScene.skySeed = sceneSkySeed(g_sceneCatalogIndex);
+    g_activeScene.skyFlowDirectionX = direction->x;
+    g_activeScene.skyFlowDirectionY = direction->y;
+    g_activeScene.descriptorIndex = g_sceneCatalogIndex;
     g_activeScene.startTick = startTick;
-    g_activeScene.endTick = startTick + M8_SCENE_DURATION_MS;
+    g_activeScene.endTick = startTick + M9_SCENE_DURATION_MS;
+    g_sceneCatalogIndex = (g_sceneCatalogIndex + 1u) % M9_SCENE_CATALOG_SIZE;
 }
 
 static void advanceSceneTo(ULONGLONG now) {
@@ -1070,7 +1113,6 @@ static SceneState makeSceneState(ULONGLONG now) {
     state.skyFlowDirectionX = g_activeScene.skyFlowDirectionX;
     state.skyFlowDirectionY = g_activeScene.skyFlowDirectionY;
     state.starDensity = (float)cfg_starDensity / 100.0f;
-    state.starDensity *= g_activeScene.starDensityMultiplier;
     state.skyFlowSpeed = (float)cfg_skyFlowSpeed / 100.0f;
     state.scene = g_activeScene.scene;
     return state;
@@ -1316,6 +1358,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrev, LPSTR cmdLine, int show
         return 1;
     }
     g_sceneRandomState = makeSceneRandomState();
+    g_sceneCatalogIndex = nextSceneRandomValue() % M9_SCENE_CATALOG_SIZE;
     g_tick0 = GetTickCount64();
     beginScene(g_tick0);
     if (!initShader()) {

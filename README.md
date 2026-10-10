@@ -23,8 +23,8 @@ procedural inertial sky while preserving a fixed, low-overhead runtime budget.
   used for the shadow, disk intersections, and local sky deflection.
 - **Directional procedural sky** — a denser layered deep-star field, compact star
   clusters, and a faint dust band are seeded once per bounded scene interval.
-  Each interval receives one random straight world-direction drift that remains
-  independent of the black-hole center, roll, and size; only escaping rays in
+  Each interval selects one of eight straight compass-direction drifts that
+  remains independent of the black-hole center, roll, and size; only escaping rays in
   the strong-lensing region sample a deflected direction from that same moving
   sky. Deflected paths gather adjacent procedural catalogue
   cells only near a source-cell edge, without changing star size; this prevents
@@ -32,11 +32,11 @@ procedural inertial sky while preserving a fixed, low-overhead runtime budget.
   Only truly near-tangential non-captured exits smoothly fall back to direct
   sky; stable escaping rays retain full deflection rather than switching at a
   binary ray-exit threshold.
-- **Bounded scene choreography** — one host-owned Schwarzschild-style scene is
-  immutable for each 45-second interval. It randomly samples only approved
-  off-center position, apparent-radius, and north-hemisphere angle bounds,
-  spanning pole-on through near-equatorial views without flipping; continuous
-  wrapped disk-space filaments evolve only within traced disk-plane
+- **Discrete scene choreography** — one host-owned Schwarzschild-style scene is
+  immutable for each 45-second interval. A finite 1,080-scene catalogue spans
+  five pole-to-equator views, a 3-by-3 screen-position grid, three apparent
+  radii, and eight sky-flow directions; every cut changes all four dimensions.
+  Continuous wrapped disk-space filaments evolve only within traced disk-plane
   intersections.
 - **GPU back-pressure** — a 10 ms timer is a maximum submission cadence, not a
   frame-rate promise. A single OpenGL fence allows at most one frame in flight;
@@ -48,7 +48,7 @@ procedural inertial sky while preserving a fixed, low-overhead runtime budget.
 
 The fragment shader traces a ray from each pixel through a compact
 Schwarzschild-style field. A ray can be captured by the shadow, escape to the
-background sky, or enter a finite, slightly flared analytic disk body. At a
+background sky, or enter a finite, slightly thick analytic disk body. At a
 disk entry, the renderer combines these separately:
 
 - disk density: a non-emissive inner plunging region and wrapped procedural
@@ -66,27 +66,28 @@ The screensaver launches directly into a near-black procedural sky. It never
 captures, uploads, displays, or distorts the desktop.
 
 The host owns one immutable active Schwarzschild-style scene at a time. Every
-45 seconds it performs an intentional hard cut and randomly samples a new
-bounded composition; no black hole drifts, breathes, or interpolates within an
-interval. Each scene randomly selects an apparent radius from `0.100–0.135`
-and a disk-normal polar angle from `0.050–1.480 rad`: near zero is the
-**north-pole / face-on** view, while the strictly sub-`pi/2` upper bound reaches
-near-equatorial / edge-on without crossing the disk plane or flipping to the
-opposite face. Roll remains `0.00–0.78 rad`.
+45 seconds it performs an intentional hard cut to the next entry in a finite
+1,080-scene catalogue; no black hole drifts, breathes, or interpolates within
+an interval. The catalogue has five disk-normal polar angles — `0`, `pi/8`,
+`pi/4`, `3*pi/8`, and `pi/2` — spanning the **north-pole / face-on** through
+explicitly approved equatorial / edge-on views. Its three apparent radii are
+`0.1000`, `0.1175`, and `0.1350`.
 
-Each scene also selects one of four off-center placement slots: upper-left,
-upper-right, lower-left, or lower-right. Their X ranges are `0.30–0.42` or
-`0.58–0.70`, and their Y ranges are `0.33–0.47` or `0.53–0.67`, so a black-hole
-center is never `(0.50, 0.50)`. This is neither Kerr spin nor camera orbit.
+Every scene position is one exact point in the `0.33 / 0.50 / 0.66` by
+`0.33 / 0.50 / 0.66` nine-position grid, including the deliberate centered
+`(0.50, 0.50)` composition. It also selects one of eight normalized compass
+sky-flow directions. The cyclic catalogue is started at a random launch
+offset, contains each descriptor once, and guarantees that the inclination,
+position, size, and flow direction all differ at every adjacent cut. This is
+neither Kerr spin nor camera orbit.
 
-Disk material parameters remain fixed. Disk material time does not reset at a
-scene change. Each active scene samples and freezes a sky-layout seed, a
-straight world-direction sky flow, and a star density multiplier. The
-persisted **Star density** setting remains the user
-baseline and is multiplied by the bounded `0.85–1.15` scene value before the
-existing `0.5–2.0` shader safety clamp. `Sky flow speed` remains a speed-only
-control. Thus direct-sky features translate at `SKY_FLOW_SPEED = 0.1500` in
-one straight direction per scene and never orbit a black-hole or screen center.
+Disk material parameters remain fixed and disk material time does not reset at
+a scene change. The host derives and freezes a sky-layout seed from the launch
+seed and descriptor. The persisted **Star density** setting is uploaded as the
+user baseline under the existing `0.5–2.0` shader safety clamp; `Sky flow
+speed` remains a speed-only control. Thus direct-sky features translate at
+`SKY_FLOW_SPEED = 0.1500` in one straight direction per scene and never orbit
+a black-hole or screen center.
 In the strong-lensing ring, a parity-reversed secondary star image can move
 locally opposite that direct background flow; this is a qualitative lensing
 effect, not body-following sky motion. Weak deflection remains continuously
@@ -219,12 +220,13 @@ kept explicit so the Windows host, its one-frame fence policy, and the fragment
 source can evolve without silently changing the shipped source of truth.
 
 The milestone contract verifiers are development and CI tools, not runtime
-requirements. `tools\verify-milestone-8.ps1` validates bounded immutable scene
-selection, off-center north-hemisphere angle/size bounds, generated shader include,
-host-to-shader mappings, retained M7 schema-v3/static settings invariants, and
+requirements. `tools\verify-milestone-9.ps1` validates the immutable discrete
+scene catalogue, its five inclinations, nine positions, three sizes, eight sky
+directions, adjacent-transition differences, generated shader include,
+host-to-shader mappings, retained M7 schema-v3 settings invariants, and
 rendering constraints. CI runs it, builds, runs the M6 OpenGL shader smoke, and
-runs the M7 configuration runtime smoke. Historical M1–M7 verifiers remain
-frozen milestone artifacts; M8 explicitly retains and verifies the M7 settings
+runs the M7 configuration runtime smoke. Historical M1–M8 verifiers remain
+frozen milestone artifacts; M9 explicitly retains and verifies the M7 settings
 behavior that applies after scene selection.
 
 ## Project layout

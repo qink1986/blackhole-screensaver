@@ -22,9 +22,9 @@ jobs:
         with:
           arch: x64
 
-      - name: Verify Milestone 8 contract
+      - name: Verify Milestone 9 contract
         shell: powershell
-        run: .\tools\verify-milestone-8.ps1
+        run: .\tools\verify-milestone-9.ps1
 
       - name: Build
         shell: cmd
