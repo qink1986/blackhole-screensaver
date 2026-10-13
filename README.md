@@ -121,10 +121,10 @@ The five `/c` settings are stored under `HKCU\Software\BlackHoleScreensaver`:
 - **Star density** — physical integer `50–200%`, default `100%`
 - **Sky flow speed** — physical integer `0–500%`, default `100%`
 
-All five UI bars display a normalized `0.000–1.000` value. Brightness, disk
-opacity, and Doppler map linearly to `0–100%`; density maps to `50–200%`; and
-sky speed maps to `0–500%` (`0.200` is the original `100%` baseline and
-`1.000` is `500%`).
+All five UI bars display a normalized `0.00–1.00` value in `0.05` increments
+(20 discrete intervals). Brightness, disk opacity, and Doppler map linearly to
+`0–100%`; density maps to `50–200%`; and sky speed maps to `0–500%` (`0.20`
+is the original `100%` baseline and `1.00` is `500%`).
 
 Schema `ConfigSchemaVersion = 3` reads all five fields independently. Missing
 markers and schema 1 intentionally read only the legacy three and use 100% for

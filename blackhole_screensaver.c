@@ -619,7 +619,7 @@ static int saveConfig(const ConfigValues* config) {
 #define SETTINGS_CLIENT_WIDTH 460
 #define SETTINGS_CLIENT_HEIGHT 235
 #define SETTINGS_WINDOW_STYLE (WS_CAPTION | WS_SYSMENU | WS_THICKFRAME)
-#define SETTINGS_SLIDER_UNITS 1000
+#define SETTINGS_SLIDER_UNITS 20
 
 typedef enum SettingsWindowMode {
     SETTINGS_WINDOW_CONFIG,
@@ -686,7 +686,7 @@ static int settingValueFromSlider(int index, int position) {
 
 static void setControlText(HWND hwnd, int controlId, int position) {
     char buffer[16];
-    sprintf(buffer, "%.3f", (double)position / SETTINGS_SLIDER_UNITS);
+    sprintf(buffer, "%.2f", (double)position / SETTINGS_SLIDER_UNITS);
     SetDlgItemTextA(hwnd, controlId, buffer);
 }
 
@@ -771,9 +771,9 @@ static void createSettingsControls(HWND hwnd, SettingsWindowMode mode, const Con
         HWND control = CreateWindowA("STATIC", names[index], WS_CHILD | WS_VISIBLE,
             0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)(CFG_ID_STAR_SLIDER + 50 + index), hInst, NULL);
         SendMessage(control, WM_SETFONT, (WPARAM)font, TRUE);
-        // The bar stores 0..1000 implementation units for a smooth normalized
-        // 0.000..1.000 value. Do not expose that raw position through the
-        // common-control tooltip; the adjacent label is the canonical value.
+        // The bar stores 20 discrete intervals for normalized values from
+        // 0.00 through 1.00 in 0.05 steps. Do not expose that raw position
+        // through the common-control tooltip; the adjacent label is canonical.
         control = CreateWindowA(TRACKBAR_CLASSA, "", WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS,
             0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)(CFG_ID_STAR_SLIDER + index), hInst, NULL);
         SendMessage(control, TBM_SETRANGE, TRUE, MAKELONG(0, SETTINGS_SLIDER_UNITS));
