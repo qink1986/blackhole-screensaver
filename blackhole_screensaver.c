@@ -90,7 +90,7 @@ static const StaticSchwarzschildScene M9_SCHWARZSCHILD_BASELINE = {
 };
 
 #define M9_SCENE_DURATION_MS 45000ULL
-#define M9_INCLINATION_COUNT 5u
+#define M9_INCLINATION_COUNT 4u
 #define M9_POSITION_COUNT 9u
 #define M9_APPARENT_RADIUS_COUNT 3u
 #define M9_SKY_DIRECTION_COUNT 8u
@@ -114,10 +114,10 @@ typedef struct M9SceneDescriptor {
     unsigned int skyDirectionIndex;
 } M9SceneDescriptor;
 
-// Inclination is the polar angle of the disk normal: 0 is north-pole/face-on
-// and pi/2 is the explicitly approved equatorial/edge-on fifth view.
+// Inclination is the polar angle of the disk normal: 0 is north-pole/face-on.
+// Every catalogue view remains below pi/2, excluding the edge-on equatorial view.
 static const GLfloat M9_INCLINATIONS[M9_INCLINATION_COUNT] = {
-    0.0000000f, 0.3926991f, 0.7853982f, 1.1780972f, 1.5707963f
+    0.0000000f, 0.3926991f, 0.7853982f, 1.1780972f
 };
 
 static const M9ScenePosition M9_POSITIONS[M9_POSITION_COUNT] = {
@@ -138,10 +138,10 @@ static const M9SkyFlowDirection M9_SKY_FLOW_DIRECTIONS[M9_SKY_DIRECTION_COUNT] =
     { 0.0000000f, -1.0000000f }, { 0.7071068f, -0.7071068f }
 };
 
-// These phase tables form a cyclic full catalogue: every 5*9*3*8 descriptor
+// These phase tables form a cyclic full catalogue: every 4*9*3*8 descriptor
 // occurs once, while any consecutive pair changes inclination, position,
 // apparent radius, and sky-flow direction.
-static const unsigned int M9_INCLINATION_PHASE_BY_DIRECTION[M9_SKY_DIRECTION_COUNT] = { 0u, 3u, 4u, 0u, 1u, 2u, 3u, 4u };
+static const unsigned int M9_INCLINATION_PHASE_BY_DIRECTION[M9_SKY_DIRECTION_COUNT] = { 0u, 1u, 2u, 3u, 0u, 1u, 2u, 3u };
 static const unsigned int M9_POSITION_PHASE_BY_DIRECTION[M9_SKY_DIRECTION_COUNT] = { 0u, 2u, 3u, 4u, 5u, 6u, 7u, 8u };
 static const unsigned int M9_RADIUS_PHASE_BY_DIRECTION[M9_SKY_DIRECTION_COUNT] = { 0u, 2u, 0u, 1u, 2u, 0u, 1u, 2u };
 

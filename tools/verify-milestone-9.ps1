@@ -45,9 +45,10 @@ if ([int]$contract.sceneLifecycle.durationMilliseconds -ne 45000 -or
     $contract.sceneLifecycle.statePolicy -ne 'host-owned-active-scene-immutable-within-interval' -or
     $contract.sceneLifecycle.diskTime -ne 'run-relative-continuous') { Fail 'scene lifecycle contract' }
 $angles = @($contract.catalog.inclinationsRadians)
-if ($angles.Count -ne 5 -or $angles[0] -ne 0.0 -or [math]::Abs([double]$angles[1] - 0.3926991) -gt 0.0000001 -or
-    [math]::Abs([double]$angles[2] - 0.7853982) -gt 0.0000001 -or [math]::Abs([double]$angles[3] - 1.1780972) -gt 0.0000001 -or
-    [math]::Abs([double]$angles[4] - 1.5707963) -gt 0.0000001) { Fail 'five pole-to-equator inclinations' }
+if ($angles.Count -ne 4 -or $angles[0] -ne 0.0 -or [math]::Abs([double]$angles[1] - 0.3926991) -gt 0.0000001 -or
+    [math]::Abs([double]$angles[2] - 0.7853982) -gt 0.0000001 -or [math]::Abs([double]$angles[3] - 1.1780972) -gt 0.0000001) {
+    Fail 'four non-equatorial inclinations'
+}
 $positions = @($contract.catalog.positions)
 if ($positions.Count -ne 9) { Fail 'nine position grid count' }
 $requiredPositions = @('0.33,0.33', '0.5,0.33', '0.66,0.33', '0.33,0.5', '0.5,0.5', '0.66,0.5', '0.33,0.66', '0.5,0.66', '0.66,0.66')
@@ -55,7 +56,7 @@ $actualPositions = @($positions | ForEach-Object { '{0},{1}' -f ([double]$_[0]),
 if (@($actualPositions | Sort-Object -Unique).Count -ne 9 -or @($requiredPositions | Where-Object { $_ -notin $actualPositions }).Count -ne 0) { Fail 'exact 33/50/66 position grid' }
 $radii = @($contract.catalog.apparentRadii)
 if ($radii.Count -ne 3 -or [double]$radii[0] -ne 0.1000 -or [double]$radii[1] -ne 0.1175 -or [double]$radii[2] -ne 0.1350 -or
-    [int]$contract.catalog.skyDirectionCount -ne 8 -or [int]$contract.catalog.catalogSize -ne 1080 -or
+    [int]$contract.catalog.skyDirectionCount -ne 8 -or [int]$contract.catalog.catalogSize -ne 864 -or
     $contract.catalog.selection -ne 'random-cyclic-offset-over-discrete-full-catalog' -or
     $contract.catalog.consecutiveScenes -ne 'inclination-position-radius-and-direction-all-differ' -or
     $contract.catalog.cyclePolicy -ne 'every-descriptor-once-per-cycle-and-cycle-boundary-differs') { Fail 'discrete catalogue policy' }
@@ -69,9 +70,9 @@ $source = [IO.File]::ReadAllText($sourcePath, [Text.Encoding]::UTF8).Replace("`r
 $shader = [IO.File]::ReadAllText($shaderPath, [Text.Encoding]::UTF8).Replace("`r`n", "`n").Replace("`r", "`n")
 $acceptance = [IO.File]::ReadAllText($acceptancePath, [Text.Encoding]::UTF8).Replace("`r`n", "`n").Replace("`r", "`n")
 foreach ($anchor in @(
-    '#define M9_SCENE_DURATION_MS 45000ULL', '#define M9_INCLINATION_COUNT 5u', '#define M9_POSITION_COUNT 9u',
+    '#define M9_SCENE_DURATION_MS 45000ULL', '#define M9_INCLINATION_COUNT 4u', '#define M9_POSITION_COUNT 9u',
     '#define M9_APPARENT_RADIUS_COUNT 3u', '#define M9_SKY_DIRECTION_COUNT 8u', '#define M9_SCENE_CATALOG_SIZE',
-    'static const GLfloat M9_INCLINATIONS[M9_INCLINATION_COUNT]', '0.0000000f, 0.3926991f, 0.7853982f, 1.1780972f, 1.5707963f',
+    'static const GLfloat M9_INCLINATIONS[M9_INCLINATION_COUNT]', '0.0000000f, 0.3926991f, 0.7853982f, 1.1780972f',
     'static const M9ScenePosition M9_POSITIONS[M9_POSITION_COUNT]', '{ 0.50f, 0.50f }',
     'static const GLfloat M9_APPARENT_RADII[M9_APPARENT_RADIUS_COUNT]', '0.1000f, 0.1175f, 0.1350f',
     'static const M9SkyFlowDirection M9_SKY_FLOW_DIRECTIONS[M9_SKY_DIRECTION_COUNT]',
@@ -100,7 +101,7 @@ foreach ($token in @($contract.retained.forbiddenTokens)) { Need-NotContains $sh
 foreach ($token in @('glTex', 'glGenFramebuffers', 'glBindFramebuffer', 'DesktopSnapshot', 'captureDesktop', 'BitBlt')) { Need-NotContains $source $token 'host forbidden path' }
 if (([regex]::Matches($source, '\bglDrawArrays\s*\(')).Count -ne [int]$contract.retained.drawCallCount) { Fail 'draw call count' }
 Need $source ([string]$contract.retained.drawCall) 'fullscreen draw form'
-foreach ($needle in @('five polar angles', 'nine exact screen centers', 'Every adjacent pair', 'one 45-second interval', 'no scene-catalogue controls')) { Need $acceptance $needle 'M9 acceptance policy' }
+foreach ($needle in @('four non-equatorial polar angles', 'nine exact screen centers', 'Every adjacent pair', 'one 45-second interval', 'no scene-catalogue controls')) { Need $acceptance $needle 'M9 acceptance policy' }
 
 # Execute the exact phase tables parsed from the host implementation. This
 # proves the real finite cycle has every Cartesian descriptor exactly once and
@@ -120,11 +121,11 @@ foreach ($anchor in @(
     'descriptor.skyDirectionIndex = directionCycle;'
 )) { Need $descriptorFunction $anchor 'host catalogue enumeration' }
 $seen = @{}
-for ($index = 0; $index -lt 1080; ++$index) {
+for ($index = 0; $index -lt 864; ++$index) {
     $value = $index; $direction = $value % 8; $value = [math]::Floor($value / 8)
     $radius = $value % 3; $value = [math]::Floor($value / 3)
     $position = $value % 9; $inclination = [math]::Floor($value / 9)
-    $descriptor = '{0},{1},{2},{3}' -f (($inclination + $inclinationPhases[$direction]) % 5), (($position + $positionPhases[$direction]) % 9), (($radius + $radiusPhases[$direction]) % 3), $direction
+    $descriptor = '{0},{1},{2},{3}' -f (($inclination + $inclinationPhases[$direction]) % 4), (($position + $positionPhases[$direction]) % 9), (($radius + $radiusPhases[$direction]) % 3), $direction
     if ($seen.ContainsKey($descriptor)) { Fail "duplicate descriptor in M9 cycle at index $index" }
     $seen[$descriptor] = $index
     if ($index -gt 0) {
@@ -133,11 +134,11 @@ for ($index = 0; $index -lt 1080; ++$index) {
         for ($dimension = 0; $dimension -lt 4; ++$dimension) { if ($parts[$dimension] -eq $priorParts[$dimension]) { Fail "M9 adjacent catalogue scenes repeat dimension $dimension at index $index" } }
     }
 }
-if ($seen.Count -ne 1080) { Fail 'incomplete M9 catalogue coverage' }
+if ($seen.Count -ne 864) { Fail 'incomplete M9 catalogue coverage' }
 $firstDescriptor = $null; $lastDescriptor = $null
 foreach ($entry in $seen.GetEnumerator()) {
     if ($entry.Value -eq 0) { $firstDescriptor = $entry.Key.Split(',') }
-    if ($entry.Value -eq 1079) { $lastDescriptor = $entry.Key.Split(',') }
+    if ($entry.Value -eq 863) { $lastDescriptor = $entry.Key.Split(',') }
 }
 for ($dimension = 0; $dimension -lt 4; ++$dimension) {
     if ($firstDescriptor[$dimension] -eq $lastDescriptor[$dimension]) { Fail "M9 cycle boundary repeats dimension $dimension" }

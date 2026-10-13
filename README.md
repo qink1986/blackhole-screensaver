@@ -33,8 +33,8 @@ procedural inertial sky while preserving a fixed, low-overhead runtime budget.
   sky; stable escaping rays retain full deflection rather than switching at a
   binary ray-exit threshold.
 - **Discrete scene choreography** — one host-owned Schwarzschild-style scene is
-  immutable for each 45-second interval. A finite 1,080-scene catalogue spans
-  five pole-to-equator views, a 3-by-3 screen-position grid, three apparent
+  immutable for each 45-second interval. A finite 864-scene catalogue spans
+  four non-equatorial views, a 3-by-3 screen-position grid, three apparent
   radii, and eight sky-flow directions; every cut changes all four dimensions.
   Continuous wrapped disk-space filaments evolve only within traced disk-plane
   intersections.
@@ -67,11 +67,11 @@ captures, uploads, displays, or distorts the desktop.
 
 The host owns one immutable active Schwarzschild-style scene at a time. Every
 45 seconds it performs an intentional hard cut to the next entry in a finite
-1,080-scene catalogue; no black hole drifts, breathes, or interpolates within
-an interval. The catalogue has five disk-normal polar angles — `0`, `pi/8`,
-`pi/4`, `3*pi/8`, and `pi/2` — spanning the **north-pole / face-on** through
-explicitly approved equatorial / edge-on views. Its three apparent radii are
-`0.1000`, `0.1175`, and `0.1350`.
+864-scene catalogue; no black hole drifts, breathes, or interpolates within
+an interval. The catalogue has four non-equatorial disk-normal polar angles —
+`0`, `pi/8`, `pi/4`, and `3*pi/8` — spanning the **north-pole / face-on**
+through an oblique view while excluding the equatorial / edge-on composition.
+Its three apparent radii are `0.1000`, `0.1175`, and `0.1350`.
 
 Every scene position is one exact point in the `0.33 / 0.50 / 0.66` by
 `0.33 / 0.50 / 0.66` nine-position grid, including the deliberate centered
@@ -221,7 +221,7 @@ source can evolve without silently changing the shipped source of truth.
 
 The milestone contract verifiers are development and CI tools, not runtime
 requirements. `tools\verify-milestone-9.ps1` validates the immutable discrete
-scene catalogue, its five inclinations, nine positions, three sizes, eight sky
+scene catalogue, its four non-equatorial inclinations, nine positions, three sizes, eight sky
 directions, adjacent-transition differences, generated shader include,
 host-to-shader mappings, retained M7 schema-v3 settings invariants, and
 rendering constraints. CI runs it, builds, runs the M6 OpenGL shader smoke, and
